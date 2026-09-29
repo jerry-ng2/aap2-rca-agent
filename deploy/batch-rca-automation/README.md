@@ -11,26 +11,8 @@ This system automatically:
 - Tracks analyzed jobs to prevent duplicate processing
 - Persists analysis results to PVC for long-term storage
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ OpenShift CronJob (every 30 minutes)                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  Init Container: Setup SSH, Claude settings, skills        │
-│  Main Container: Run batch_rca_headless.sh                 │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-              │
-              ▼
-    ┌──────────────────────┐
-    │ PersistentVolumeClaim│
-    │  - reports/          │
-    │  - analysis results  │
-    │  - state tracking    │
-    └──────────────────────┘
-```
+See the [root README](../../README.md#architecture) for the architecture
+diagram and full flowchart.
 
 ## How It Works
 
@@ -42,31 +24,22 @@ The orchestration script (`batch_rca_headless.sh`):
 5. Generates aggregated batch reports
 6. Updates state tracking to prevent re-processing
 
-## Performance
+## Python dependencies and tests
 
-| Metric | Value |
-|--------|-------|
-| **Jobs analyzed** | 50+ jobs/day |
-| **Success rate** | ~95% | 
-| **Init time** | 14 seconds |
-| **Analysis time** | 2-3 minutes for 5-7 jobs (parallel) |
+Runtime dependencies for both the skill and this batch app are declared in the
+repository-root `requirements.txt`. The Docker image installs that shared file;
+there is no batch-specific Python environment or dependency manifest. From the
+repository root, install development/test dependencies and run the unified test
+suite with:
 
-## Output
-
-**Batch Reports:** `/workspace/reports/batch_YYYYMMDD_HHMMSS.json`
-
-```json
-{
-  "batch_id": "batch_YYYYMMDD_HHMMSS",
-  "total_jobs_requested": 4,
-  "total_jobs_completed": 4,
-  "root_cause_category_breakdown": {
-    "infrastructure": 3,
-    "configuration": 1
-  },
-  "job_summaries": [...]
-}
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
 ```
 
-**Individual Analysis:** `/workspace/.claude/skills/root-cause-analysis/.analysis/{job_id}/`
-- Session metadata, job context, Splunk logs, correlation analysis, GitHub history, final RCA report
+The batch PostgreSQL integration tests can also be run with
+`deploy/batch-rca-automation/tests/run_integration_tests.sh`.
+
+See the [root README](../../README.md#performance) for performance metrics
+and the batch/per-job output format.
