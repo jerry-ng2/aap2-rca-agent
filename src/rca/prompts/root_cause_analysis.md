@@ -19,14 +19,35 @@ Read these files from the job’s analysis directory:
    investigation is needed.
 
 Do not rerun Steps 1–4, fetch the job log again, mutate configuration or
-environment variables, or overwrite the deterministic artifacts.
+environment variables, or overwrite the deterministic artifacts. The only
+permitted Step 4 update is adding `mcp_verified` and `mcp_findings` to an
+existing GitHub error entry during the verification procedure below.
+
+## GitHub MCP verification
+
+If Step 4 records `error: "all_paths_failed"` or a failed path status such as
+`404`:
+
+1. Use `mcp__github__get_file_contents` to inspect the nearest parent directory
+   and determine whether the path contains a parser, casing, hyphen, or
+   underscore error.
+2. If the parent directory is not found, use `mcp__github__search_code` to
+   locate the filename or partial path.
+3. If verification reveals the correct path, fetch only that exact file with
+   `mcp__github__get_file_contents` and use the returned content and path as
+   evidence.
+4. Add `mcp_verified: true` and concise `mcp_findings` to the corresponding
+   existing error entry in `step4_github_fetch_history.json`.
+
+Do not use GitHub MCP tools to fetch unrelated files or replace Step 4. If a
+failed path cannot be verified, report that limitation rather than guessing.
 
 ## Output
 
 Write exactly one file: `step5_analysis_summary.json` in the job’s analysis
-directory. Return a concise confirmation after writing it. Do not upload the
-analysis; the Python orchestrator performs and verifies upload after validating
-the summary.
+directory. The file and your final structured output must contain the same JSON
+object. Do not upload the analysis; the Python orchestrator performs and
+verifies upload after validating the summary.
 
 ## Analysis guidelines
 
@@ -41,8 +62,8 @@ the summary.
 - Correlation analysis: distinguish direct causation from temporal
   correlation. Use GUIDs, namespaces, timestamps, and pod names to connect AAP
   failures to Splunk events.
-- GitHub evidence: use only files and paths present in Step 4. Do not infer a
-  GitHub path that the artifacts do not contain.
+- GitHub evidence: use only files and paths present in Step 4 or verified
+  through GitHub MCP verification. Do not infer a GitHub path.
 
 ## Summary requirements
 

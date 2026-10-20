@@ -44,11 +44,24 @@ def _write_summary(analysis_dir: Path) -> None:
     (analysis_dir / "step5_analysis_summary.json").write_text(
         json.dumps(
             {
+                "job_id": analysis_dir.name,
+                "analyzed_at": "2026-01-01T00:00:00Z",
                 "root_cause": {
                     "summary": "A test failure",
                     "category": "infrastructure",
                     "confidence": "high",
-                }
+                },
+                "correlation": {"method": "test", "identifiers": {}},
+                "evidence": [
+                    {
+                        "source": "aap_job",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "message": "A test failure occurred",
+                    }
+                ],
+                "causal_chain": [],
+                "misidentifications": [],
+                "recommendations": [],
             }
         ),
         encoding="utf-8",
@@ -114,6 +127,9 @@ def test_packaged_rca_instructions_load_without_filesystem_discovery() -> None:
     assert prompt == orchestrator.RCA_INSTRUCTIONS
     assert "root-cause analyst" in prompt
     assert "step5_analysis_summary.json" in prompt
+    assert "GitHub MCP verification" in prompt
+    assert "mcp__github__get_file_contents" in prompt
+    assert "mcp__github__search_code" in prompt
 
 
 def test_sdk_options_disable_discovery_and_use_packaged_instructions(
@@ -178,6 +194,20 @@ def test_synthesis_prompt_does_not_invoke_a_skill(tmp_path: Path) -> None:
     assert "Analyze AAP job 123" in prompt
     assert str(analysis_dir) in prompt
     assert "step5_analysis_summary.json" in prompt
+    assert "final structured output" in prompt
+
+
+def test_step5_summary_rejects_schema_invalid_output(tmp_path: Path) -> None:
+    analysis_dir = tmp_path / ".analysis" / "123"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "step5_analysis_summary.json").write_text(
+        json.dumps({"root_cause": {"summary": "Incomplete"}}),
+        encoding="utf-8",
+    )
+    artifacts = AnalysisArtifacts("123", analysis_dir, {}, {}, {}, {})
+
+    with pytest.raises(ValueError, match="Step 5 summary failed schema validation"):
+        orchestrator._read_step5_summary(artifacts)
 
 
 def test_sdk_result_usage_and_semaphore_limit(
@@ -633,8 +663,10 @@ def test_dry_run_skips_jumpbox_upload(
     artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
     upload = Mock(return_value=True)
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
+    sdk_kwargs: dict[str, object] = {}
 
     async def fake_sdk_query(*args: object, **kwargs: object) -> orchestrator.SDKQueryResult:
+        sdk_kwargs.update(kwargs)
         _write_summary(analysis_dir)
         return orchestrator.SDKQueryResult(
             False,
@@ -661,6 +693,7 @@ def test_dry_run_skips_jumpbox_upload(
 
     upload.assert_not_called()
     assert execution.status == "completed"
+    assert sdk_kwargs["output_format"] == orchestrator._SUMMARY_OUTPUT_FORMAT
 
 
 def test_store_batch_report_links_in_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:

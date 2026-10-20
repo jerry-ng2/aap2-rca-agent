@@ -70,6 +70,16 @@ _SEMANTIC_OUTPUT_SCHEMA: dict[str, Any] = json.loads(
     .joinpath("batch_semantic_output.schema.json")
     .read_text(encoding="utf-8")
 )
+_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = json.loads(
+    files("rca")
+    .joinpath("schemas")
+    .joinpath("summary.schema.json")
+    .read_text(encoding="utf-8")
+)
+_SUMMARY_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": _SUMMARY_OUTPUT_SCHEMA,
+}
 _BATCH_REPORT_SCHEMA: dict[str, Any] = json.loads(
     files("rca")
     .joinpath("schemas")
@@ -326,8 +336,9 @@ def _synthesis_prompt(job_id: str, artifacts: AnalysisArtifacts) -> str:
     return f"""Analyze AAP job {job_id} using the existing artifacts.
 
 Write the summary to
-`{artifacts.analysis_dir / 'step5_analysis_summary.json'}`. After writing the
-summary, stop and briefly report whether it was written."""
+`{artifacts.analysis_dir / 'step5_analysis_summary.json'}`. The file and your
+final structured output must contain the same JSON object. After writing the
+file, stop and return that object."""
 
 
 def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
@@ -341,9 +352,13 @@ def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
         raise ValueError(f"Could not read Step 5 summary {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"Step 5 summary must contain a JSON object: {path}")
-    root_cause = data.get("root_cause")
-    if not isinstance(root_cause, dict) or not isinstance(root_cause.get("summary"), str):
-        raise ValueError(f"Step 5 summary has no root_cause.summary: {path}")
+    try:
+        jsonschema.validate(instance=data, schema=_SUMMARY_OUTPUT_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path) or "$"
+        raise ValueError(
+            f"Step 5 summary failed schema validation at {location}: {exc.message}"
+        ) from exc
     return data
 
 
@@ -386,6 +401,7 @@ async def _execute_one_job(
             cwd=cwd,
             semaphore=sdk_semaphore,
             system_prompt=RCA_INSTRUCTIONS,
+            output_format=_SUMMARY_OUTPUT_FORMAT,
         )
         if result.is_error:
             detail = "; ".join(result.errors) or result.text or "agent reported an error"
