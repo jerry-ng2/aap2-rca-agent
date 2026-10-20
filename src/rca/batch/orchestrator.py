@@ -70,10 +70,26 @@ _SEMANTIC_OUTPUT_SCHEMA: dict[str, Any] = json.loads(
     .joinpath("batch_semantic_output.schema.json")
     .read_text(encoding="utf-8")
 )
+_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = json.loads(
+    files("rca")
+    .joinpath("schemas")
+    .joinpath("summary.schema.json")
+    .read_text(encoding="utf-8")
+)
+_SUMMARY_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": _SUMMARY_OUTPUT_SCHEMA,
+}
 _BATCH_REPORT_SCHEMA: dict[str, Any] = json.loads(
     files("rca")
     .joinpath("schemas")
     .joinpath("batch_report.structured_output.schema.json")
+    .read_text(encoding="utf-8")
+)
+RCA_INSTRUCTIONS = (
+    files("rca")
+    .joinpath("prompts")
+    .joinpath("root_cause_analysis.md")
     .read_text(encoding="utf-8")
 )
 
@@ -129,6 +145,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-pre-filter",
         action="store_true",
         help="Skip matching jobs against recent known issues before full analysis",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write the local report without updating the database or uploading to the jumpbox",
     )
     return parser
 
@@ -230,19 +251,20 @@ def _make_sdk_options(
     config: Config,
     *,
     cwd: Path,
-    include_skill: bool,
+    system_prompt: str | None,
     output_format: dict[str, Any] | None = None,
 ) -> Any:
     kwargs: dict[str, Any] = {
         "model": config.environment.get("CLAUDE_MODEL") or None,
         "cwd": str(cwd),
         "permission_mode": "dontAsk",
-        "setting_sources": ["user", "project"],
+        "setting_sources": [],
+        "skills": [],
         "env": _agent_environment(config),
     }
-    if include_skill:
+    if system_prompt is not None:
         kwargs.update(
-            skills=["root-cause-analysis"],
+            system_prompt=system_prompt,
             allowed_tools=[
                 "Bash",
                 "Read",
@@ -264,7 +286,7 @@ async def _run_sdk_query(
     *,
     cwd: Path,
     semaphore: asyncio.Semaphore,
-    include_skill: bool = False,
+    system_prompt: str | None = None,
     output_format: dict[str, Any] | None = None,
 ) -> SDKQueryResult:
     sdk = _load_agent_sdk()
@@ -272,7 +294,7 @@ async def _run_sdk_query(
         sdk,
         config,
         cwd=cwd,
-        include_skill=include_skill,
+        system_prompt=system_prompt,
         output_format=output_format,
     )
 
@@ -310,20 +332,13 @@ async def _run_sdk_query(
     )
 
 
-def _skill_prompt(job_id: str, artifacts: AnalysisArtifacts) -> str:
-    return f"""Analyze AAP job {job_id} using the `root-cause-analysis` Skill.
+def _synthesis_prompt(job_id: str, artifacts: AnalysisArtifacts) -> str:
+    return f"""Analyze AAP job {job_id} using the existing artifacts.
 
-Invoke the Skill tool for this job:
-Skill({{skill: 'root-cause-analysis', args: '{job_id}'}})
-
-The Python batch orchestrator has already completed deterministic Steps 1–4
-and saved their artifacts in `{artifacts.analysis_dir}`. Do not rerun those
-steps, fetch the job log again, or overwrite their files. Follow the Skill's
-Step 5 analysis guidance using the existing artifacts, and write the summary to
-`{artifacts.analysis_dir / 'step5_analysis_summary.json'}`. After writing the
-summary, stop and briefly report whether it was written. Do not run the Skill's
-upload command: the Python orchestrator will perform and verify the required
-upload after validating your summary."""
+Write the summary to
+`{artifacts.analysis_dir / 'step5_analysis_summary.json'}`. The file and your
+final structured output must contain the same JSON object. After writing the
+file, stop and return that object."""
 
 
 def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
@@ -337,9 +352,13 @@ def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
         raise ValueError(f"Could not read Step 5 summary {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"Step 5 summary must contain a JSON object: {path}")
-    root_cause = data.get("root_cause")
-    if not isinstance(root_cause, dict) or not isinstance(root_cause.get("summary"), str):
-        raise ValueError(f"Step 5 summary has no root_cause.summary: {path}")
+    try:
+        jsonschema.validate(instance=data, schema=_SUMMARY_OUTPUT_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path) or "$"
+        raise ValueError(
+            f"Step 5 summary failed schema validation at {location}: {exc.message}"
+        ) from exc
     return data
 
 
@@ -350,6 +369,7 @@ async def _execute_one_job(
     executor: ThreadPoolExecutor,
     sdk_semaphore: asyncio.Semaphore,
     cwd: Path,
+    dry_run: bool,
 ) -> JobExecution:
     rendered_id = str(job_id)
     started = time.monotonic()
@@ -376,11 +396,12 @@ async def _execute_one_job(
         # query may qualify the current execution as successful.
         (artifacts.analysis_dir / "step5_analysis_summary.json").unlink(missing_ok=True)
         result = await _run_sdk_query(
-            _skill_prompt(rendered_id, artifacts),
+            _synthesis_prompt(rendered_id, artifacts),
             config,
             cwd=cwd,
             semaphore=sdk_semaphore,
-            include_skill=True,
+            system_prompt=RCA_INSTRUCTIONS,
+            output_format=_SUMMARY_OUTPUT_FORMAT,
         )
         if result.is_error:
             detail = "; ".join(result.errors) or result.text or "agent reported an error"
@@ -389,7 +410,7 @@ async def _execute_one_job(
                 status="failed",
                 duration_ms=max(0, int((time.monotonic() - started) * 1000)),
                 artifacts=artifacts,
-                error=f"Skill execution failed: {detail}"[:1000],
+                error=f"Agent synthesis failed: {detail}"[:1000],
                 stage="skill_execution",
                 cost_usd=result.cost_usd,
                 usage=result.usage,
@@ -414,40 +435,41 @@ async def _execute_one_job(
             status="failed",
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
             artifacts=artifacts,
-            error=f"Skill execution failed: {exc}"[:1000],
+            error=f"Agent synthesis failed: {exc}"[:1000],
             stage="skill_execution",
             cost_usd=result.cost_usd if result else None,
             usage=result.usage if result else None,
             model_usage=result.model_usage if result else None,
         )
 
-    try:
-        uploaded = await loop.run_in_executor(
-            executor,
-            partial(
-                upload_to_jumpbox,
-                rendered_id,
-                artifacts.analysis_dir,
-                jumpbox_uri=config.jumpbox_uri,
-                session_id=result.session_id,
-                ssh_jumpbox_alias=config.environment.get("SSH_JUMPBOX_ALIAS"),
-            ),
-        )
-        if not uploaded:
-            raise RuntimeError("Upload helper reported failure")
-    except Exception as exc:
-        return JobExecution(
-            job_id=rendered_id,
-            status="failed",
-            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
-            artifacts=artifacts,
-            summary=summary,
-            error=f"Analysis upload failed: {exc}"[:1000],
-            stage="upload",
-            cost_usd=result.cost_usd,
-            usage=result.usage,
-            model_usage=result.model_usage,
-        )
+    if not dry_run:
+        try:
+            uploaded = await loop.run_in_executor(
+                executor,
+                partial(
+                    upload_to_jumpbox,
+                    rendered_id,
+                    artifacts.analysis_dir,
+                    jumpbox_uri=config.jumpbox_uri,
+                    session_id=result.session_id,
+                    ssh_jumpbox_alias=config.environment.get("SSH_JUMPBOX_ALIAS"),
+                ),
+            )
+            if not uploaded:
+                raise RuntimeError("Upload helper reported failure")
+        except Exception as exc:
+            return JobExecution(
+                job_id=rendered_id,
+                status="failed",
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                artifacts=artifacts,
+                summary=summary,
+                error=f"Analysis upload failed: {exc}"[:1000],
+                stage="upload",
+                cost_usd=result.cost_usd,
+                usage=result.usage,
+                model_usage=result.model_usage,
+            )
 
     return JobExecution(
         job_id=rendered_id,
@@ -469,8 +491,9 @@ async def _analyze_one_job(
     job_semaphore: asyncio.Semaphore,
     sdk_semaphore: asyncio.Semaphore,
     cwd: Path,
+    dry_run: bool,
 ) -> JobExecution:
-    """Keep deterministic analysis and its Skill query under one job limit."""
+    """Keep deterministic analysis and its Agent SDK query under one job limit."""
     async with job_semaphore:
         return await _execute_one_job(
             job_id,
@@ -479,6 +502,7 @@ async def _analyze_one_job(
             executor,
             sdk_semaphore,
             cwd,
+            dry_run,
         )
 
 
@@ -488,6 +512,7 @@ async def _analyze_jobs(
     db_pool: Any,
     *,
     cwd: Path,
+    dry_run: bool = False,
 ) -> list[JobExecution]:
     job_semaphore = asyncio.Semaphore(config.max_parallel_jobs)
     sdk_semaphore = asyncio.Semaphore(config.max_parallel_jobs)
@@ -503,6 +528,7 @@ async def _analyze_jobs(
                 job_semaphore,
                 sdk_semaphore,
                 cwd,
+                dry_run,
             )
             for job_id in job_ids
         ]
@@ -1185,6 +1211,7 @@ def _recover_failed_representatives(
     pool: Any,
     *,
     cwd: Path,
+    dry_run: bool = False,
 ) -> tuple[list[JobExecution], list[dict[str, Any]]]:
     """Analyze another duplicate when its representative fails."""
 
@@ -1210,7 +1237,13 @@ def _recover_failed_representatives(
                 candidate,
             )
             recovered = asyncio.run(
-                _analyze_jobs([candidate], config, pool, cwd=cwd)
+                _analyze_jobs(
+                    [candidate],
+                    config,
+                    pool,
+                    cwd=cwd,
+                    dry_run=dry_run,
+                )
             )
             executions.extend(recovered)
             if recovered and recovered[0].status == "completed":
@@ -1281,6 +1314,7 @@ def run_batch(
     since: str | None = None,
     limit: int | None = None,
     no_pre_filter: bool = False,
+    dry_run: bool = False,
     pool: Any | None = None,
     now: datetime | None = None,
     cwd: Path | None = None,
@@ -1390,15 +1424,18 @@ def run_batch(
 
         if pre_matched:
             logger.info("Pre-filter matched %d job(s)", len(pre_matched))
-            try:
-                with pooled_connection(pool) as conn:
-                    store_pre_matched(conn, database, pre_matched, commit=False)
-                    if not analyze_ids and dupes:
-                        link_intra_batch_dupes(conn, database, dupes, commit=False)
-                    conn.commit()
-            except psycopg2.Error as exc:
-                logger.error("Failed to store pre-matched jobs: %s", exc)
-                return 1
+            if dry_run:
+                logger.info("[DRY-RUN] Skipping pre-matched job persistence")
+            else:
+                try:
+                    with pooled_connection(pool) as conn:
+                        store_pre_matched(conn, database, pre_matched, commit=False)
+                        if not analyze_ids and dupes:
+                            link_intra_batch_dupes(conn, database, dupes, commit=False)
+                        conn.commit()
+                except psycopg2.Error as exc:
+                    logger.error("Failed to store pre-matched jobs: %s", exc)
+                    return 1
 
         if not analyze_ids:
             # Every cluster representative was skip-matched, so skip_targets (and
@@ -1409,9 +1446,14 @@ def run_batch(
             logger.info("[SUCCESS] Batch RCA completed")
             return 0
 
-        logger.info("[STEP 2] Running deterministic analysis and Skill-based RCA for %d job(s)", len(analyze_ids))
+        logger.info(
+            "[STEP 2] Running deterministic analysis and Agent SDK synthesis for %d job(s)",
+            len(analyze_ids),
+        )
         agent_spawn = _utc_now().isoformat().replace("+00:00", "Z")
-        executions = asyncio.run(_analyze_jobs(analyze_ids, config, pool, cwd=working_dir))
+        executions = asyncio.run(
+            _analyze_jobs(analyze_ids, config, pool, cwd=working_dir, dry_run=dry_run)
+        )
         executions, dupes = _recover_failed_representatives(
             executions,
             dupes,
@@ -1419,6 +1461,7 @@ def run_batch(
             config,
             pool,
             cwd=working_dir,
+            dry_run=dry_run,
         )
         report_summaries, cross_patterns, aggregation_result = _run_agent_batch(
             executions,
@@ -1439,15 +1482,18 @@ def run_batch(
         report_path = _write_report(config, report)
         _log_mlflow_usage(config, batch_id, executions, aggregation_result)
 
-        logger.info("[STEP 5] Storing batch report")
-        try:
-            if not _store_batch_report(pool, database, report, report_path, dupes):
-                logger.error("Report storage helper rejected batch %s", batch_id)
+        if dry_run:
+            logger.info("[STEP 5] Skipping database persistence (--dry-run)")
+        else:
+            logger.info("[STEP 5] Storing batch report")
+            try:
+                if not _store_batch_report(pool, database, report, report_path, dupes):
+                    logger.error("Report storage helper rejected batch %s", batch_id)
+                    return 1
+                report_path = _write_report(config, report)
+            except psycopg2.Error as exc:
+                logger.error("Failed to store report in database: %s", exc)
                 return 1
-            report_path = _write_report(config, report)
-        except psycopg2.Error as exc:
-            logger.error("Failed to store report in database: %s", exc)
-            return 1
 
         prepare_jira_tickets(report)
         failed_count = report["total_jobs_failed"]
@@ -1491,6 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
         since=args.since,
         limit=args.limit,
         no_pre_filter=args.no_pre_filter,
+        dry_run=args.dry_run,
     )
 
 

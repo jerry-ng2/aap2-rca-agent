@@ -1,8 +1,8 @@
 # Contributing
 
 Thanks for improving the AAP RCA agent. Python source code lives in the
-installable `src/rca` package; the shell batch coordinator and on-disk Skill
-remain in place while their runtime replacement is handled separately.
+installable `src/rca` package; the shell batch entry point remains only as a
+compatibility wrapper.
 
 ## Development
 
