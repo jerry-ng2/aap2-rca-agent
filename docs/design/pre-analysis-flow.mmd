@@ -1,4 +1,6 @@
 flowchart TD
+    %% Solid edges show the current implementation.
+    %% Dotted edges show the planned task/role/play-aware extension.
     Start([Queried unanalyzed job IDs]) --> Metadata["fetch_job_metadata()
 job_name + error_message"]
     Metadata --> MetadataResult{Query succeeded or database error?}
@@ -65,3 +67,44 @@ similarity >= 0.75 and >= 1 significant token per error
 Different catalog:
 similarity >= 0.90 and >= 3 significant tokens per error"]
     HistoryScorer -.-> ScoringRules
+
+    subgraph PlannedTaskRolePlay["Planned: task / role / play-aware matching"]
+        IncomingTaskContext["Fetch failed-task context before the gate
+task, play, role, task_action, task_path, error_message"]
+        HistoricalTaskContext["Fetch historical matching context
+failing_role, failing_github_path,
+and persisted or joined task/play/action data"]
+        ContextAvailable{Task and historical context available?}
+        HierarchicalSignal["Build hierarchical MatchSignals
+catalog + play + role + task/action/path + error"]
+        StrongestLevel{Strongest shared level}
+        TaskLevel["Task-level match
+same role + task/action/path
+plus specific error"]
+        RoleLevel["Role-level match
+same role + compatible task/action
+plus specific error"]
+        PlayLevel["Play-level match
+same play + role/task context"]
+        LevelPolicy["Task level may skip full analysis
+Role level clusters or requires stronger confirmation
+Play level supports correlation only"]
+        CurrentFallback["Missing task/role/play context
+use the current catalog + error-only signal"]
+    end
+
+    SortedIDs -.-> IncomingTaskContext
+    Recent -.-> HistoricalTaskContext
+    IncomingTaskContext --> ContextAvailable
+    HistoricalTaskContext --> ContextAvailable
+    ContextAvailable -- No --> CurrentFallback
+    ContextAvailable -- Yes --> HierarchicalSignal
+    HierarchicalSignal --> StrongestLevel
+    StrongestLevel -- Task --> TaskLevel
+    StrongestLevel -- Role --> RoleLevel
+    StrongestLevel -- Play --> PlayLevel
+    TaskLevel --> LevelPolicy
+    RoleLevel --> LevelPolicy
+    PlayLevel --> LevelPolicy
+    LevelPolicy -.-> ClusterScore
+    CurrentFallback -.-> SignalAvailable
