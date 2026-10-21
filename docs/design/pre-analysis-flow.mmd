@@ -1,6 +1,6 @@
 flowchart TD
     %% Solid edges show the current implementation.
-    %% Dotted edges show the planned task/role/play-aware extension.
+    %% Dotted edges show the planned task-level issue extension.
     Start([Queried unanalyzed job IDs]) --> Metadata["fetch_job_metadata()
 job_name + error_message"]
     Metadata --> MetadataResult{Query succeeded or database error?}
@@ -68,43 +68,38 @@ Different catalog:
 similarity >= 0.90 and >= 3 significant tokens per error"]
     HistoryScorer -.-> ScoringRules
 
-    subgraph PlannedTaskRolePlay["Planned: task / role / play-aware matching"]
+    subgraph PlannedTaskLevelIssues["Planned: task-level issues across shared roles/plays"]
         IncomingTaskContext["Fetch failed-task context before the gate
 task, play, role, task_action, task_path, error_message"]
-        HistoricalTaskContext["Fetch historical matching context
-failing_role, failing_github_path,
-and persisted or joined task/play/action data"]
-        ContextAvailable{Task and historical context available?}
-        HierarchicalSignal["Build hierarchical MatchSignals
-catalog + play + role + task/action/path + error"]
-        StrongestLevel{Strongest shared level}
-        TaskLevel["Task-level match
-same role + task/action/path
-plus specific error"]
-        RoleLevel["Role-level match
-same role + compatible task/action
-plus specific error"]
-        PlayLevel["Play-level match
-same play + role/task context"]
-        LevelPolicy["Task level may skip full analysis
-Role level clusters or requires stronger confirmation
-Play level supports correlation only"]
-        CurrentFallback["Missing task/role/play context
+        TaskSignature["Build a task-level signature
+role/play + task/action/path + specific error"]
+        SharedScope["Roles, plays, and tasks are shared across CIs
+task failure is the primary issue identity"]
+        CanonicalLookup["Find the canonical issue
+by task signature or issue_id"]
+        IssueFound{Canonical issue exists?}
+        LinkToIssue["Link the incoming job and CI
+to the existing issue_id"]
+        AnalyzeNewIssue["Continue to full analysis
+the first analyzed result becomes the canonical issue"]
+        CIAssociations["Lookup distinct associated CIs
+WHERE id = issue_id OR related_result_id = issue_id"]
+        SingleIssue["One canonical task-level issue
+many associated catalog items"]
+        CurrentFallback["Missing task-level context
 use the current catalog + error-only signal"]
     end
 
     SortedIDs -.-> IncomingTaskContext
-    Recent -.-> HistoricalTaskContext
-    IncomingTaskContext --> ContextAvailable
-    HistoricalTaskContext --> ContextAvailable
-    ContextAvailable -- No --> CurrentFallback
-    ContextAvailable -- Yes --> HierarchicalSignal
-    HierarchicalSignal --> StrongestLevel
-    StrongestLevel -- Task --> TaskLevel
-    StrongestLevel -- Role --> RoleLevel
-    StrongestLevel -- Play --> PlayLevel
-    TaskLevel --> LevelPolicy
-    RoleLevel --> LevelPolicy
-    PlayLevel --> LevelPolicy
-    LevelPolicy -.-> ClusterScore
+    Recent -.-> CanonicalLookup
+    IncomingTaskContext --> TaskSignature
+    TaskSignature --> SharedScope
+    SharedScope --> CanonicalLookup
+    CanonicalLookup --> IssueFound
+    IssueFound -- Yes --> LinkToIssue
+    IssueFound -- No --> AnalyzeNewIssue
+    LinkToIssue --> CIAssociations
+    AnalyzeNewIssue -.-> Analyze
+    CIAssociations --> SingleIssue
+    SingleIssue -.-> Outputs
     CurrentFallback -.-> SignalAvailable
