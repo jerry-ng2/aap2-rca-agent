@@ -1,0 +1,67 @@
+flowchart TD
+    Start([Queried unanalyzed job IDs]) --> Metadata["fetch_job_metadata()
+job_name + error_message"]
+    Metadata --> MetadataResult{Query succeeded or database error?}
+    MetadataResult -- "Database error" --> EmptyMetadata["metadata = {}"]
+    MetadataResult -- "Success" --> HistoryMode
+    EmptyMetadata --> HistoryMode{Historical pre-filter enabled?}
+
+    HistoryMode -- "--no-pre-filter" --> NoHistory["use_history = false
+recent_results = []"]
+    HistoryMode -- "Enabled" --> Recent["fetch_recent_results()
+high confidence, analyzed, active
+last 4 hours"]
+    Recent --> RecentResult{Query succeeded or database error?}
+    RecentResult -- "Database error" --> EmptyHistory["recent_results = []
+use_history remains true"]
+    RecentResult -- "Success" --> Gate
+    EmptyHistory --> Gate
+    NoHistory --> Gate["pre_analysis_gate()"]
+
+    Gate --> OrderedIDs["Deduplicate input while preserving query order"]
+    OrderedIDs --> SortedIDs["Iterate jobs in ascending job-ID order"]
+    SortedIDs --> SignalAvailable{Job signal available?}
+    SignalAvailable -- No --> Singleton["Create singleton cluster"]
+    SignalAvailable -- Yes --> ClusterScore["Compare with the first job
+in each existing cluster"]
+    ClusterScore --> ClusterScorer["score_similarity(stage='pre_analysis')"]
+    ClusterScorer --> HighConfidence{High confidence?}
+    HighConfidence -- Yes --> AppendCluster["Append job to matching cluster"]
+    HighConfidence -- No --> NewCluster["Create new singleton cluster"]
+    Singleton --> Clusters
+    AppendCluster --> Clusters
+    NewCluster --> Clusters[Clusters with ascending-ID representatives]
+
+    Clusters --> UseHistory{use_history?}
+    UseHistory -- No --> Analyze
+    UseHistory -- Yes --> Ambiguity["Group historical results by catalog item
+catalogs with multiple root-cause categories are ambiguous"]
+    Ambiguity --> RepresentativeSignal{Representative signal available?}
+    RepresentativeSignal -- No --> Analyze
+    RepresentativeSignal -- Yes --> HistoricalScore["Score representative against
+historical results from unambiguous catalogs"]
+    HistoricalScore --> HistoryScorer["score_similarity(stage='pre_analysis')"]
+    HistoryScorer --> Matched{Best high-confidence match?}
+    Matched -- No --> Analyze["analyze_ids in original query order"]
+    Matched -- Yes --> Skip["Select highest score;
+lower historical result ID wins ties"]
+
+    Analyze --> Outputs
+    Skip --> SkipTargets["skip_targets:
+representative job ID -> historical result ID"]
+    SkipTargets --> PreMatched["pre_matched_entries()
+sorted by original query order"]
+    PreMatched --> Outputs
+    Clusters --> Dupes["dupes:
+each duplicate job ID -> representative job ID"]
+    Dupes --> Outputs([Pre-analysis outputs])
+
+    Gate -. "ValueError, KeyError, or TypeError" .-> Fallback["Analyze all queried job IDs
+no skip targets or duplicates"]
+    Fallback --> Outputs
+
+    ClusterScorer -.-> ScoringRules["Same catalog:
+similarity >= 0.75 and >= 1 significant token per error
+Different catalog:
+similarity >= 0.90 and >= 3 significant tokens per error"]
+    HistoryScorer -.-> ScoringRules
