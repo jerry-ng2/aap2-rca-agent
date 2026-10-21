@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from importlib.resources import files
 from pathlib import Path
+from string import Template
 from typing import Any, Mapping
 
 import jsonschema
@@ -86,12 +87,20 @@ _BATCH_REPORT_SCHEMA: dict[str, Any] = json.loads(
     .joinpath("batch_report.structured_output.schema.json")
     .read_text(encoding="utf-8")
 )
-RCA_INSTRUCTIONS = (
-    files("rca")
-    .joinpath("prompts")
-    .joinpath("root_cause_analysis.md")
-    .read_text(encoding="utf-8")
-)
+
+
+def _load_prompt(filename: str) -> str:
+    return (
+        files("rca")
+        .joinpath("prompts")
+        .joinpath(filename)
+        .read_text(encoding="utf-8")
+    )
+
+
+RCA_INSTRUCTIONS = _load_prompt("root_cause_analysis.md")
+_SYNTHESIS_PROMPT_TEMPLATE = Template(_load_prompt("synthesis.md"))
+_SEMANTIC_PROMPT_TEMPLATE = Template(_load_prompt("semantic.md"))
 
 
 @dataclass(frozen=True)
@@ -333,12 +342,10 @@ async def _run_sdk_query(
 
 
 def _synthesis_prompt(job_id: str, artifacts: AnalysisArtifacts) -> str:
-    return f"""Analyze AAP job {job_id} using the existing artifacts.
-
-Write the summary to
-`{artifacts.analysis_dir / 'step5_analysis_summary.json'}`. The file and your
-final structured output must contain the same JSON object. After writing the
-file, stop and return that object."""
+    return _SYNTHESIS_PROMPT_TEMPLATE.substitute(
+        job_id=job_id,
+        summary_path=artifacts.analysis_dir / "step5_analysis_summary.json",
+    )
 
 
 def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
@@ -558,33 +565,10 @@ def _normalize_json_output(result: SDKQueryResult) -> dict[str, Any]:
 def _semantic_prompt(
     job_summaries: list[dict[str, Any]], known_issues: list[dict[str, Any]]
 ) -> str:
-    return f"""Compare these newly analyzed jobs against recent known issues and
-against one another. Return only the requested structured JSON.
-
-Historical matching rules:
-- Only consider new jobs with high or medium confidence.
-- Match only when the error type, failing component, and failure mode are
-  genuinely the same. A shared category or catalog item alone is insufficient.
-- Use only matched_result_id values present in the supplied known-issue list.
-- Give one concise sentence of evidence-based similarity reasoning per match.
-- Include a confidence value and concise evidence for each match. Evidence
-  should cite concrete signatures, components, resources, logs, or artifacts.
-- Distinguish observed facts from inferences in the evidence.
-
-Cross-job pattern rules:
-- Report only clear overlaps across at least two new jobs: same failing
-  component and substantially the same error/failure mode.
-- Do not infer a pattern from a shared category alone. Return an empty array
-  when no clear pattern exists.
-- Include only job IDs from the supplied newly analyzed jobs.
-- Include a confidence value and concise evidence for each pattern. Evidence
-  should explain why the jobs belong to the same failure pattern.
-
-Newly analyzed jobs:
-{json.dumps(job_summaries, ensure_ascii=False, default=str)}
-
-Known recent issues:
-{json.dumps(known_issues, ensure_ascii=False, default=str)}"""
+    return _SEMANTIC_PROMPT_TEMPLATE.substitute(
+        job_summaries=json.dumps(job_summaries, ensure_ascii=False, default=str),
+        known_issues=json.dumps(known_issues, ensure_ascii=False, default=str),
+    )
 
 
 def _normalize_semantics(

@@ -2,8 +2,8 @@
 
 Automated root-cause analysis for failed Ansible Automation Platform (AAP)
 jobs on the Red Hat Demo Platform (RHDP). The Python package runs the batch
-workflow and deterministic analysis; packaged Agent SDK instructions provide
-per-job RCA guidance.
+workflow and deterministic analysis; packaged prompt templates provide
+per-job RCA, synthesis, and semantic aggregation guidance.
 
 ## Architecture
 

@@ -116,20 +116,31 @@ def test_cli_rejects_non_positive_limit() -> None:
         orchestrator._build_parser().parse_args(["--limit", "0"])
 
 
-def test_packaged_rca_instructions_load_without_filesystem_discovery() -> None:
-    prompt = (
-        files("rca")
-        .joinpath("prompts")
-        .joinpath("root_cause_analysis.md")
-        .read_text(encoding="utf-8")
-    )
+def test_packaged_prompts_load_without_filesystem_discovery() -> None:
+    prompt_files = {
+        "root_cause_analysis.md": orchestrator.RCA_INSTRUCTIONS,
+        "synthesis.md": orchestrator._SYNTHESIS_PROMPT_TEMPLATE.template,
+        "semantic.md": orchestrator._SEMANTIC_PROMPT_TEMPLATE.template,
+    }
 
-    assert prompt == orchestrator.RCA_INSTRUCTIONS
-    assert "root-cause analyst" in prompt
-    assert "step5_analysis_summary.json" in prompt
-    assert "GitHub MCP verification" in prompt
-    assert "mcp__github__get_file_contents" in prompt
-    assert "mcp__github__search_code" in prompt
+    for filename, prompt in prompt_files.items():
+        packaged_prompt = (
+            files("rca")
+            .joinpath("prompts")
+            .joinpath(filename)
+            .read_text(encoding="utf-8")
+        )
+        assert packaged_prompt == prompt
+
+    assert "root-cause analyst" in prompt_files["root_cause_analysis.md"]
+    assert "step5_analysis_summary.json" in prompt_files["root_cause_analysis.md"]
+    assert "GitHub MCP verification" in prompt_files["root_cause_analysis.md"]
+    assert "mcp__github__get_file_contents" in prompt_files["root_cause_analysis.md"]
+    assert "mcp__github__search_code" in prompt_files["root_cause_analysis.md"]
+    assert "$job_id" in prompt_files["synthesis.md"]
+    assert "$summary_path" in prompt_files["synthesis.md"]
+    assert "$job_summaries" in prompt_files["semantic.md"]
+    assert "$known_issues" in prompt_files["semantic.md"]
 
 
 def test_sdk_options_disable_discovery_and_use_packaged_instructions(
@@ -195,6 +206,18 @@ def test_synthesis_prompt_does_not_invoke_a_skill(tmp_path: Path) -> None:
     assert str(analysis_dir) in prompt
     assert "step5_analysis_summary.json" in prompt
     assert "final structured output" in prompt
+
+
+def test_semantic_prompt_renders_packaged_data() -> None:
+    job_summaries = [{"job_id": 123, "confidence": "high"}]
+    known_issues = [{"result_id": 456}]
+    prompt = orchestrator._semantic_prompt(job_summaries, known_issues)
+
+    assert "Compare these newly analyzed jobs" in prompt
+    assert json.dumps(job_summaries) in prompt
+    assert json.dumps(known_issues) in prompt
+    assert "$job_summaries" not in prompt
+    assert "$known_issues" not in prompt
 
 
 def test_step5_summary_rejects_schema_invalid_output(tmp_path: Path) -> None:
