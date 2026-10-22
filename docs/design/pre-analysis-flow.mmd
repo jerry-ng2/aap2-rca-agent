@@ -17,7 +17,7 @@ fallback: catalog item + error message"]
         Representative["Use one representative job"]
         Known{"Known, unambiguous issue for this task signature?"}
         Link["Link job and affected catalog item to existing issue"]
-        New["Analyze representative for rca-agent as a new issue"]
+        New["Analyze representative as a new issue"]
     end
 
     TaskContext --> Signature
@@ -32,5 +32,5 @@ fallback: catalog item + error message"]
     Known -- No --> New
 
     Link --> IssueLinks([Issue links and affected catalog items])
-    New --> ToAnalysis([Representatives to analyze])
+    New --> ToAnalysis([Representatives for rca-agent to analyze])
     Group --> DuplicateLinks([Duplicate links])
