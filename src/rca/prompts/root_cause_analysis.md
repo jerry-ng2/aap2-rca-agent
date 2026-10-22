@@ -18,6 +18,9 @@ Read these files from the job’s analysis directory:
 4. `step2_splunk_logs.json` — read only when Step 3 indicates that deeper log
    investigation is needed.
 
+If Step 2 is marked `skipped`, treat Splunk evidence as unavailable, do not
+retry it, and continue the synthesis from the remaining artifacts.
+
 Do not rerun Steps 1–4, fetch the job log again, mutate configuration or
 environment variables, or overwrite the deterministic artifacts. The only
 permitted Step 4 update is adding `mcp_verified` and `mcp_findings` to an

@@ -169,6 +169,8 @@ def run_analysis(
                 "ocp_logs": [],
                 "error_logs": [],
                 "pods_found": [],
+                "skipped": True,
+                "reason": f"Splunk is unavailable: {exc}",
                 "errors": [str(exc)],
             }
     save_step(analysis_dir, 2, splunk_logs)
