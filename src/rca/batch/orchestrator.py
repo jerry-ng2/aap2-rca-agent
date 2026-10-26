@@ -309,9 +309,11 @@ async def _run_sdk_query(
 
     terminal_message = None
     async with semaphore:
-        async for message in sdk.query(prompt=prompt, options=options):
-            if _is_result_message(message):
-                terminal_message = message
+        async with sdk.ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                if _is_result_message(message):
+                    terminal_message = message
 
     if terminal_message is None:
         raise RuntimeError("Agent SDK query ended without a terminal result")
@@ -1130,6 +1132,30 @@ def _mlflow_environment(environment: Mapping[str, str]):
                 os.environ[key] = value
 
 
+def _enable_mlflow_tracing(config: Config) -> None:
+    enabled = config.environment.get("MLFLOW_CLAUDE_TRACING_ENABLED", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    tracking_uri = config.environment.get("MLFLOW_TRACKING_URI", "")
+    experiment_name = config.environment.get("MLFLOW_EXPERIMENT_NAME", "")
+    if not enabled or not tracking_uri or not experiment_name:
+        logger.info("MLflow Agent SDK tracing is not configured; skipping")
+        return
+
+    try:
+        import mlflow
+
+        with _mlflow_environment(config.environment):
+            mlflow.set_tracking_uri(tracking_uri)
+            mlflow.set_experiment(experiment_name)
+            mlflow.anthropic.autolog()
+        logger.info("MLflow Agent SDK tracing enabled")
+    except Exception as exc:
+        logger.warning("Could not enable MLflow Agent SDK tracing: %s", exc)
+
+
 def _log_mlflow_usage(
     config: Config,
     batch_id: str,
@@ -1472,37 +1498,39 @@ def run_batch(
             "[STEP 2] Running deterministic analysis and Agent SDK synthesis for %d job(s)",
             len(analyze_ids),
         )
-        agent_spawn = _utc_now().isoformat().replace("+00:00", "Z")
-        executions = asyncio.run(
-            _analyze_jobs(analyze_ids, config, pool, cwd=working_dir, dry_run=dry_run)
-        )
-        executions, dupes = _recover_failed_representatives(
-            executions,
-            dupes,
-            set(skip_targets),
-            config,
-            pool,
-            cwd=working_dir,
-            dry_run=dry_run,
-        )
-        report_summaries, cross_patterns, aggregation_result = _run_agent_batch(
-            executions,
-            known_issues,
-            config,
-            cwd=working_dir,
-        )
-        report = _build_report(
-            batch_id=batch_id,
-            requested_count=len(analyze_ids),
-            executions=executions,
-            job_summaries=report_summaries,
-            cross_job_patterns=cross_patterns,
-            agent_spawn=agent_spawn,
-            batch_started=batch_started,
-            generated_at=started_at,
-        )
-        report_path = _write_report(config, report)
-        _log_mlflow_usage(config, batch_id, executions, aggregation_result)
+        with _mlflow_environment(config.environment):
+            _enable_mlflow_tracing(config)
+            agent_spawn = _utc_now().isoformat().replace("+00:00", "Z")
+            executions = asyncio.run(
+                _analyze_jobs(analyze_ids, config, pool, cwd=working_dir, dry_run=dry_run)
+            )
+            executions, dupes = _recover_failed_representatives(
+                executions,
+                dupes,
+                set(skip_targets),
+                config,
+                pool,
+                cwd=working_dir,
+                dry_run=dry_run,
+            )
+            report_summaries, cross_patterns, aggregation_result = _run_agent_batch(
+                executions,
+                known_issues,
+                config,
+                cwd=working_dir,
+            )
+            report = _build_report(
+                batch_id=batch_id,
+                requested_count=len(analyze_ids),
+                executions=executions,
+                job_summaries=report_summaries,
+                cross_job_patterns=cross_patterns,
+                agent_spawn=agent_spawn,
+                batch_started=batch_started,
+                generated_at=started_at,
+            )
+            report_path = _write_report(config, report)
+            _log_mlflow_usage(config, batch_id, executions, aggregation_result)
 
         if dry_run:
             logger.info("[STEP 5] Skipping database persistence (--dry-run)")
