@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from rca.analysis.pipeline import AnalysisArtifacts
+from rca.analysis import tracing
 from rca.batch import orchestrator
 from rca.config import Config
 
@@ -1482,3 +1483,36 @@ def test_mlflow_tracing_is_skipped_when_disabled(
 
     mlflow.set_tracking_uri.assert_not_called()
     mlflow.anthropic.autolog.assert_not_called()
+
+
+def test_batch_disables_pipeline_tracing_without_disabling_agent_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_calls: list[str] = []
+
+    class FakeMLflow:
+        def trace(self, name: str, span_type=None):
+            def decorator(fn):
+                def wrapper(*args: object, **kwargs: object):
+                    pipeline_calls.append(name)
+                    return fn(*args, **kwargs)
+
+                return wrapper
+
+            return decorator
+
+    monkeypatch.setattr(tracing, "HAS_MLFLOW", True)
+    monkeypatch.setattr(tracing, "mlflow", FakeMLflow())
+    tracing.set_pipeline_tracing_enabled(True)
+
+    @tracing.trace("Pipeline step")
+    def pipeline_step() -> str:
+        return "ok"
+
+    tracing.set_pipeline_tracing_enabled(False)
+    assert pipeline_step() == "ok"
+    assert pipeline_calls == []
+
+    tracing.set_pipeline_tracing_enabled(True)
+    assert pipeline_step() == "ok"
+    assert pipeline_calls == ["Pipeline step"]

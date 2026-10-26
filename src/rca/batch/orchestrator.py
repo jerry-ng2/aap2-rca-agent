@@ -27,6 +27,7 @@ from psycopg2.pool import ThreadedConnectionPool
 
 from rca.analysis.jumpbox_io import upload_to_jumpbox
 from rca.analysis.pipeline import AnalysisArtifacts, run_analysis
+from rca.analysis.tracing import set_pipeline_tracing_enabled
 from rca.batch.fetch_known_issues import fetch_known_issues
 from rca.batch.match import MatchSignals, score_similarity
 from rca.batch.pre_filter_jobs import (
@@ -1498,6 +1499,7 @@ def run_batch(
             "[STEP 2] Running deterministic analysis and Agent SDK synthesis for %d job(s)",
             len(analyze_ids),
         )
+        set_pipeline_tracing_enabled(False)
         with _mlflow_environment(config.environment):
             _enable_mlflow_tracing(config)
             agent_spawn = _utc_now().isoformat().replace("+00:00", "Z")
