@@ -77,6 +77,10 @@ Produce a JSON object with:
   `network`, `resource`, `cloud_api`, `secrets`, or `unknown`; a concise
   summary; and `high`, `medium`, or `low` confidence.
 - `evidence`: supporting AAP, Splunk, configuration, or workload evidence.
+  Every item must include `source`, `timestamp`, and `message`.
+  Use the source event timestamp when available. For static configuration or
+  code evidence, use the job’s Step 1 start or end timestamp instead of
+  omitting `timestamp`.
   When `source` is `agnosticv_config` or `agnosticd_code`, include
   `github_path` in `owner/repo:path:line` format.
 - `correlation`: the method and identifiers linking AAP and Splunk evidence.

@@ -50,6 +50,56 @@ def test_store_report_reads_mapping_insert_result() -> None:
     connection.commit.assert_called_once_with()
 
 
+def test_store_report_populates_legacy_recommendation_column(tmp_path) -> None:
+    connection, cursor = _connection_and_cursor()
+    cursor.fetchone.return_value = {"id": 55}
+    analysis_dir = tmp_path / ".analysis" / "123"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "step5_analysis_summary.json").write_text(
+        json.dumps(
+            {
+                "recommendations": [
+                    {
+                        "priority": "high",
+                        "action": "fix it",
+                        "github_path": "o/r:f.yml",
+                        "details": "d",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert store_report.store_report(
+        connection,
+        {"results_table": "results", "source_table": "events"},
+        {
+            "batch_id": "batch_test",
+            "job_summaries": [
+                {
+                    "job_id": "123",
+                    "status": "analyzed",
+                    "analysis_path": str(analysis_dir),
+                }
+            ],
+        },
+    )
+
+    insert_call = cursor.execute.call_args_list[0]
+    assert "recommendation" in str(insert_call.args[0])
+    recommendation = insert_call.args[1][-1]
+    assert recommendation.adapted == [
+        {
+            "priority": "high",
+            "action": "fix it",
+            "github_path": "o/r:f.yml",
+            "details": "d",
+            "evidence_ref": None,
+            "fix": None,
+        }
+    ]
+
+
 def test_link_intra_batch_dupes_reads_mapping_result_row() -> None:
     connection, cursor = _connection_and_cursor()
     cursor.fetchone.return_value = {"aap2_job_results_fk_id": 91}

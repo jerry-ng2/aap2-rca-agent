@@ -25,6 +25,7 @@ import psycopg2
 import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
 
+from rca.analysis.bastion_resolver import ensure_jumpbox_alias
 from rca.analysis.jumpbox_io import upload_to_jumpbox
 from rca.analysis.pipeline import AnalysisArtifacts, run_analysis
 from rca.batch.fetch_known_issues import fetch_known_issues
@@ -407,6 +408,26 @@ def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
     return data
 
 
+def _agent_error_execution(
+    job_id: str,
+    started: float,
+    artifacts: AnalysisArtifacts,
+    result: SDKQueryResult,
+    detail: str,
+) -> JobExecution:
+    return JobExecution(
+        job_id=job_id,
+        status="failed",
+        duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        artifacts=artifacts,
+        error=f"Agent synthesis failed: {detail}"[:1000],
+        stage="skill_execution",
+        cost_usd=result.cost_usd,
+        usage=result.usage,
+        model_usage=result.model_usage,
+    )
+
+
 async def _execute_one_job(
     job_id: int | str,
     config: Config,
@@ -449,19 +470,30 @@ async def _execute_one_job(
             output_format=_SUMMARY_OUTPUT_FORMAT,
         )
         if result.is_error:
-            detail = "; ".join(result.errors) or result.text or "agent reported an error"
-            return JobExecution(
-                job_id=rendered_id,
-                status="failed",
-                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
-                artifacts=artifacts,
-                error=f"Agent synthesis failed: {detail}"[:1000],
-                stage="skill_execution",
-                cost_usd=result.cost_usd,
-                usage=result.usage,
-                model_usage=result.model_usage,
-            )
-        summary = _read_step5_summary(artifacts)
+            summary_path = artifacts.analysis_dir / "step5_analysis_summary.json"
+            if not summary_path.is_file():
+                return _agent_error_execution(
+                    rendered_id,
+                    started,
+                    artifacts,
+                    result,
+                    "; ".join(result.errors) or result.text or "agent reported an error",
+                )
+            try:
+                summary = _read_step5_summary(artifacts)
+            except Exception as summary_exc:
+                sdk_detail = (
+                    "; ".join(result.errors) or result.text or "agent reported an error"
+                )
+                return _agent_error_execution(
+                    rendered_id,
+                    started,
+                    artifacts,
+                    result,
+                    f"{sdk_detail}; {summary_exc}",
+                )
+        else:
+            summary = _read_step5_summary(artifacts)
     except FileNotFoundError as exc:
         return JobExecution(
             job_id=rendered_id,
@@ -1467,6 +1499,13 @@ def run_batch(
             prepare_jira_tickets({"batch_id": batch_id, "job_summaries": []})
             logger.info("[SUCCESS] Batch RCA completed")
             return 0
+
+        if not dry_run:
+            try:
+                ensure_jumpbox_alias(config)
+            except Exception as exc:
+                logger.error("Failed to prepare jumpbox SSH alias: %s", exc)
+                return 1
 
         logger.info(
             "[STEP 2] Running deterministic analysis and Agent SDK synthesis for %d job(s)",

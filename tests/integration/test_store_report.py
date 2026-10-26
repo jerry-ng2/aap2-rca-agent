@@ -70,20 +70,21 @@ def test_store_report_persists_root_cause(db, tmp_path) -> None:
 
     with db.cursor() as cur:
         cur.execute(
-            f"SELECT root_cause, root_cause_category FROM {RESULTS_TABLE}"
+            f"SELECT root_cause, root_cause_category, recommendation FROM {RESULTS_TABLE}"
             " WHERE batch_id = %s AND job_id = %s",
             ("batch_test_store_report", 21),
         )
         row = cur.fetchone()
 
     assert row is not None
-    root_cause, category = row
+    root_cause, category, recommendation = row
     assert category == "cloud_api"
     assert root_cause["summary"] == "AWS throttled RunInstances"
     assert root_cause["evidence"][0]["job_id"] == "21"
     assert root_cause["causal_chain"][0]["relationship"] == "direct_cause"
     assert root_cause["misidentifications"] == []
     assert root_cause["recommendations"] == []
+    assert recommendation == []
 
 
 def test_store_report_upserts_on_conflict(db) -> None:

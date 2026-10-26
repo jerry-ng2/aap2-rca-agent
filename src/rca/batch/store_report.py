@@ -170,19 +170,22 @@ def store_report(
         for job in jobs:
             jid = str(job.get("job_id", ""))
             status = job.get("status")
+            root_cause = build_root_cause(job, jid)
+            recommendation = root_cause.get("recommendations", [])
             cur.execute(
                 psycopg2.sql.SQL(
                     """INSERT INTO {}
                        (batch_id, job_id, status, root_cause_category, root_cause,
-                        confidence, catalog_item, job_duration_seconds)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        confidence, catalog_item, job_duration_seconds, recommendation)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (batch_id, job_id) DO UPDATE SET
                            status = EXCLUDED.status,
                            root_cause_category = EXCLUDED.root_cause_category,
                            root_cause = EXCLUDED.root_cause,
                            confidence = EXCLUDED.confidence,
                            catalog_item = EXCLUDED.catalog_item,
-                           job_duration_seconds = EXCLUDED.job_duration_seconds
+                           job_duration_seconds = EXCLUDED.job_duration_seconds,
+                           recommendation = EXCLUDED.recommendation
                        RETURNING id"""
                 ).format(psycopg2.sql.Identifier(results_table)),
                 (
@@ -190,10 +193,11 @@ def store_report(
                     jid,
                     status,
                     job.get("root_cause_category"),
-                    psycopg2.extras.Json(build_root_cause(job, jid)),
+                    psycopg2.extras.Json(root_cause),
                     job.get("confidence"),
                     job.get("catalog_item"),
                     job.get("job_duration_seconds"),
+                    psycopg2.extras.Json(recommendation),
                 ),
             )
             row = cur.fetchone()
