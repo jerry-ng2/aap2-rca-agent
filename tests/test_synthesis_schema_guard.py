@@ -188,29 +188,58 @@ def test_synthesis_prompt_includes_the_exact_packaged_schema(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("file_state", ["valid", "invalid", "missing", "stale", "wrong_job"])
+@pytest.mark.parametrize("error_site", ["stream", "cleanup"])
 def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summary(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_state: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    file_state: str,
+    error_site: str,
 ) -> None:
     config = _config(tmp_path)
     artifacts = _artifacts(tmp_path)
     if file_state == "stale":
         _save(artifacts, _summary())
     message = _terminal_message()
+    clients = []
 
     class FakeSDK:
         ResultError = claude_agent_sdk.ResultError
         HookMatcher = claude_agent_sdk.HookMatcher
         ClaudeAgentOptions = SimpleNamespace
 
-        async def query(self, **kwargs):
-            if file_state == "valid":
-                _save(artifacts, _summary())
-            elif file_state == "invalid":
-                _save(artifacts, {"job_id": "101"})
-            elif file_state == "wrong_job":
-                _save(artifacts, _summary("202"))
-            yield message
-            raise self.ResultError("Claude Code returned an error result", exit_code=1)
+        class ClaudeSDKClient:
+            def __init__(self, *, options):
+                self.options = options
+                self.queried = False
+                self.exited = False
+                clients.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                self.exited = True
+                if error_site == "cleanup":
+                    raise claude_agent_sdk.ResultError(
+                        "Claude Code returned an error result", exit_code=1
+                    )
+
+            async def query(self, prompt):
+                self.queried = True
+
+            async def receive_response(self):
+                assert self.queried
+                if file_state == "valid":
+                    _save(artifacts, _summary())
+                elif file_state == "invalid":
+                    _save(artifacts, {"job_id": "101"})
+                elif file_state == "wrong_job":
+                    _save(artifacts, _summary("202"))
+                yield message
+                if error_site == "stream":
+                    raise claude_agent_sdk.ResultError(
+                        "Claude Code returned an error result", exit_code=1
+                    )
 
     monkeypatch.setattr(orchestrator, "_load_agent_sdk", FakeSDK)
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
@@ -224,6 +253,9 @@ def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summa
     assert execution.cost_usd == message.total_cost_usd
     assert execution.usage == message.usage
     assert execution.model_usage == message.model_usage
+    assert len(clients) == 1
+    assert clients[0].queried
+    assert clients[0].exited
     if file_state == "valid":
         assert execution.status == "completed"
         assert execution.summary["job_id"] == "101"
@@ -248,8 +280,12 @@ def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summa
 @pytest.mark.parametrize(
     "failure_mode", ["no_terminal", "success_terminal", "transport_error"]
 )
+@pytest.mark.parametrize("error_site", ["stream", "cleanup"])
 def test_sdk_recovery_does_not_swallow_unrelated_failures(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_mode: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_mode: str,
+    error_site: str,
 ) -> None:
     expected_error = (
         claude_agent_sdk.ProcessError("transport failed", exit_code=2)
@@ -261,10 +297,25 @@ def test_sdk_recovery_does_not_swallow_unrelated_failures(
         ResultError = claude_agent_sdk.ResultError
         ClaudeAgentOptions = SimpleNamespace
 
-        async def query(self, **kwargs):
-            if failure_mode != "no_terminal":
-                yield _terminal_message(is_error=failure_mode != "success_terminal")
-            raise expected_error
+        class ClaudeSDKClient:
+            def __init__(self, *, options):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                if error_site == "cleanup":
+                    raise expected_error
+
+            async def query(self, prompt):
+                pass
+
+            async def receive_response(self):
+                if failure_mode != "no_terminal":
+                    yield _terminal_message(is_error=failure_mode != "success_terminal")
+                if error_site == "stream":
+                    raise expected_error
 
     monkeypatch.setattr(orchestrator, "_load_agent_sdk", FakeSDK)
     with pytest.raises(type(expected_error)) as raised:
