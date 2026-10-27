@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from rca.analysis.pipeline import AnalysisArtifacts
+from rca.analysis import tracing
 from rca.batch import orchestrator
 from rca.config import Config
 
@@ -334,12 +335,25 @@ def test_sdk_result_usage_and_semaphore_limit(
             option_values.append(options)
             return options
 
-        async def query(self, *, prompt: str, options: dict[str, object]):
-            nonlocal active, peak_active
-            active += 1
-            peak_active = max(peak_active, active)
-            try:
+        class ClaudeSDKClient:
+            def __init__(self, options: dict[str, object]):
+                self.options = options
+
+            async def __aenter__(self):
+                nonlocal active, peak_active
+                active += 1
+                peak_active = max(peak_active, active)
+                return self
+
+            async def __aexit__(self, *_args: object):
+                nonlocal active
+                active -= 1
+
+            async def query(self, prompt: str) -> None:
+                self.prompt = prompt
                 await asyncio.sleep(0.01)
+
+            async def receive_response(self):
                 yield SimpleNamespace(
                     is_error=False,
                     total_cost_usd=0.125,
@@ -351,13 +365,11 @@ def test_sdk_result_usage_and_semaphore_limit(
                             "costUSD": 0.125,
                         }
                     },
-                    result=f"completed {prompt}",
+                    result=f"completed {self.prompt}",
                     structured_output={"ok": True},
                     errors=[],
                     session_id="session-test",
                 )
-            finally:
-                active -= 1
 
     monkeypatch.setattr(orchestrator, "_load_agent_sdk", lambda: FakeSDK())
     config = _config(tmp_path, max_parallel_jobs=2)
@@ -1419,3 +1431,88 @@ def test_mlflow_logs_sdk_cost_usage_and_per_model_usage(
     assert metrics["batch_model_claude-test-v1_costUSD"] == pytest.approx(0.12)
     assert metrics["batch_input_tokens"] == 13
     assert metrics["batch_cost_usd"] == pytest.approx(0.12)
+
+
+def test_mlflow_tracing_is_opt_in_and_configures_agent_sdk_autolog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mlflow = ModuleType("mlflow")
+    mlflow.set_tracking_uri = Mock()
+    mlflow.set_experiment = Mock()
+    anthropic = ModuleType("mlflow.anthropic")
+    anthropic.autolog = Mock()
+    mlflow.anthropic = anthropic
+    monkeypatch.setitem(sys.modules, "mlflow", mlflow)
+    monkeypatch.setitem(sys.modules, "mlflow.anthropic", anthropic)
+
+    config = _config(tmp_path)
+    config.environment.update(
+        {
+            "MLFLOW_CLAUDE_TRACING_ENABLED": "true",
+            "MLFLOW_TRACKING_URI": "https://mlflow.example.test",
+            "MLFLOW_EXPERIMENT_NAME": "rca-tests",
+        }
+    )
+
+    orchestrator._enable_mlflow_tracing(config)
+
+    mlflow.set_tracking_uri.assert_called_once_with("https://mlflow.example.test")
+    mlflow.set_experiment.assert_called_once_with("rca-tests")
+    anthropic.autolog.assert_called_once_with()
+
+
+def test_mlflow_tracing_is_skipped_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mlflow = ModuleType("mlflow")
+    mlflow.set_tracking_uri = Mock()
+    mlflow.anthropic = ModuleType("mlflow.anthropic")
+    mlflow.anthropic.autolog = Mock()
+    monkeypatch.setitem(sys.modules, "mlflow", mlflow)
+
+    config = _config(tmp_path)
+    config.environment.update(
+        {
+            "MLFLOW_CLAUDE_TRACING_ENABLED": "false",
+            "MLFLOW_TRACKING_URI": "https://mlflow.example.test",
+            "MLFLOW_EXPERIMENT_NAME": "rca-tests",
+        }
+    )
+
+    orchestrator._enable_mlflow_tracing(config)
+
+    mlflow.set_tracking_uri.assert_not_called()
+    mlflow.anthropic.autolog.assert_not_called()
+
+
+def test_batch_disables_pipeline_tracing_without_disabling_agent_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_calls: list[str] = []
+
+    class FakeMLflow:
+        def trace(self, name: str, span_type=None):
+            def decorator(fn):
+                def wrapper(*args: object, **kwargs: object):
+                    pipeline_calls.append(name)
+                    return fn(*args, **kwargs)
+
+                return wrapper
+
+            return decorator
+
+    monkeypatch.setattr(tracing, "HAS_MLFLOW", True)
+    monkeypatch.setattr(tracing, "mlflow", FakeMLflow())
+    tracing.set_pipeline_tracing_enabled(True)
+
+    @tracing.trace("Pipeline step")
+    def pipeline_step() -> str:
+        return "ok"
+
+    tracing.set_pipeline_tracing_enabled(False)
+    assert pipeline_step() == "ok"
+    assert pipeline_calls == []
+
+    tracing.set_pipeline_tracing_enabled(True)
+    assert pipeline_step() == "ok"
+    assert pipeline_calls == ["Pipeline step"]
