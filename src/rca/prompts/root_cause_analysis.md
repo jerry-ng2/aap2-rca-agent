@@ -48,9 +48,14 @@ failed path cannot be verified, report that limitation rather than guessing.
 ## Output
 
 Write exactly one file: `step5_analysis_summary.json` in the job’s analysis
-directory. The file and your final structured output must contain the same JSON
-object. Do not upload the analysis; the Python orchestrator performs and
-verifies upload after validating the summary.
+directory. Follow the full JSON Schema supplied in the per-job prompt. The
+file and your final structured output must contain the same complete JSON
+object, with the requested `job_id`, `root_cause`, `correlation`, and
+`evidence` at the top level. Do not wrap the summary in `findings`, `level`,
+or another object. When submitting `StructuredOutput`, use the entire saved
+object as its input. Correct the saved file if validation rejects it.
+Do not upload the analysis; the Python orchestrator performs and verifies
+upload after validating the summary.
 
 ## Analysis guidelines
 
@@ -72,6 +77,7 @@ verifies upload after validating the summary.
 
 Produce a JSON object with:
 
+- `job_id`: the exact requested job ID as a string.
 - `root_cause`: one category from
   `application_bug`, `infrastructure`, `configuration`, `dependency`,
   `network`, `resource`, `cloud_api`, `secrets`, or `unknown`; a concise
@@ -92,8 +98,8 @@ Produce a JSON object with:
 - `recommendations`: specific, actionable changes grounded in the supplied
   evidence, with `github_path` and `evidence_ref` when applicable.
 
-Omit optional summary fields when their value is unavailable instead of using
-`null`.
+Omit unavailable optional summary fields when their schema does not allow
+`null`. Preserve the required fields and their schema-defined types.
 
 A high confidence rating requires direct, mutually consistent evidence.
 Otherwise use medium or low confidence. If the artifacts are insufficient,

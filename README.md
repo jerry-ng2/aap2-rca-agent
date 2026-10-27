@@ -79,6 +79,13 @@ Use `--no-pre-filter` to skip matching jobs against recent known issues.
 queries (default `5`). The Step 6 Jira ticket preparation hook is intentionally
 a no-op for now; no Jira integration or ticket creation is performed.
 
+Each per-job query includes the full packaged summary schema. The runner
+validates the saved Step 5 summary and uses that object as the final
+`StructuredOutput` input, rejecting missing or invalid summaries for correction.
+An SDK terminal structured-output error can recover only from a fresh,
+schema-valid summary whose `job_id` matches the requested job. Malformed,
+stale, or mismatched summaries still fail.
+
 ## Configuration and state
 
 Configuration is read as data from `RCA_SETTINGS_FILE` (default discovery:

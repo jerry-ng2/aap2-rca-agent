@@ -263,6 +263,7 @@ def _make_sdk_options(
     cwd: Path,
     system_prompt: str | None,
     output_format: dict[str, Any] | None = None,
+    summary_artifacts: AnalysisArtifacts | None = None,
 ) -> Any:
     kwargs: dict[str, Any] = {
         "model": config.environment.get("CLAUDE_MODEL") or None,
@@ -287,6 +288,15 @@ def _make_sdk_options(
         kwargs["tools"] = []
     if output_format is not None:
         kwargs["output_format"] = output_format
+    if summary_artifacts is not None:
+        kwargs["hooks"] = {
+            "PreToolUse": [
+                sdk.HookMatcher(
+                    matcher="^StructuredOutput$",
+                    hooks=[partial(_guard_summary_output, artifacts=summary_artifacts)],
+                )
+            ]
+        }
     return sdk.ClaudeAgentOptions(**kwargs)
 
 
@@ -298,6 +308,7 @@ async def _run_sdk_query(
     semaphore: asyncio.Semaphore,
     system_prompt: str | None = None,
     output_format: dict[str, Any] | None = None,
+    summary_artifacts: AnalysisArtifacts | None = None,
 ) -> SDKQueryResult:
     sdk = _load_agent_sdk()
     options = _make_sdk_options(
@@ -306,13 +317,21 @@ async def _run_sdk_query(
         cwd=cwd,
         system_prompt=system_prompt,
         output_format=output_format,
+        summary_artifacts=summary_artifacts,
     )
 
     terminal_message = None
     async with semaphore:
-        async for message in sdk.query(prompt=prompt, options=options):
-            if _is_result_message(message):
-                terminal_message = message
+        try:
+            async for message in sdk.query(prompt=prompt, options=options):
+                if _is_result_message(message):
+                    terminal_message = message
+        except sdk.ResultError:
+            # SDK 0.2.162 raises after yielding an error result when the CLI
+            # exits nonzero. Preserve that result so the caller can validate
+            # a summary written before the final structured response failed.
+            if terminal_message is None or not terminal_message.is_error:
+                raise
 
     if terminal_message is None:
         raise RuntimeError("Agent SDK query ended without a terminal result")
@@ -346,6 +365,7 @@ def _synthesis_prompt(job_id: str, artifacts: AnalysisArtifacts) -> str:
     return _SYNTHESIS_PROMPT_TEMPLATE.substitute(
         job_id=job_id,
         summary_path=artifacts.analysis_dir / "step5_analysis_summary.json",
+        summary_schema=json.dumps(_SUMMARY_OUTPUT_SCHEMA, indent=2, ensure_ascii=False),
     )
 
 
@@ -405,7 +425,53 @@ def _read_step5_summary(artifacts: AnalysisArtifacts) -> dict[str, Any]:
         raise ValueError(
             f"Step 5 summary failed schema validation at {location}: {exc.message}"
         ) from exc
+    if data["job_id"] != str(artifacts.job_id):
+        raise ValueError(
+            f"Step 5 summary job_id {data['job_id']!r} does not match job {artifacts.job_id!r}"
+        )
     return data
+
+
+def _write_step5_summary(artifacts: AnalysisArtifacts, summary: dict[str, Any]) -> None:
+    (artifacts.analysis_dir / "step5_analysis_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+async def _guard_summary_output(
+    input_data: dict[str, Any],
+    tool_use_id: str | None,
+    context: Any,
+    *,
+    artifacts: AnalysisArtifacts,
+) -> dict[str, Any]:
+    """Submit the current job's validated file through StructuredOutput."""
+    if input_data.get("tool_name") != "StructuredOutput":
+        return {}
+    try:
+        summary = _read_step5_summary(artifacts)
+        # Optional nulls are normalized by the reader. Keep the saved artifact
+        # identical to the schema-valid object sent to StructuredOutput.
+        _write_step5_summary(artifacts, summary)
+    except (OSError, ValueError) as exc:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"{exc}. Correct {artifacts.analysis_dir / 'step5_analysis_summary.json'} "
+                    "to match the supplied summary schema and job_id, then call "
+                    "StructuredOutput again with the complete saved JSON object."
+                ),
+            }
+        }
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": summary,
+        }
+    }
 
 
 def _agent_error_execution(
@@ -468,6 +534,7 @@ async def _execute_one_job(
             semaphore=sdk_semaphore,
             system_prompt=RCA_INSTRUCTIONS,
             output_format=_SUMMARY_OUTPUT_FORMAT,
+            summary_artifacts=artifacts,
         )
         if result.is_error:
             summary_path = artifacts.analysis_dir / "step5_analysis_summary.json"
@@ -492,8 +559,14 @@ async def _execute_one_job(
                     result,
                     f"{sdk_detail}; {summary_exc}",
                 )
+            logger.warning(
+                "Job %s: recovered a validated Step 5 summary after Agent SDK error: %s",
+                rendered_id,
+                "; ".join(result.errors) or result.text or "agent reported an error",
+            )
         else:
             summary = _read_step5_summary(artifacts)
+        _write_step5_summary(artifacts, summary)
     except FileNotFoundError as exc:
         return JobExecution(
             job_id=rendered_id,
