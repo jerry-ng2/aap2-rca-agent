@@ -101,8 +101,11 @@ and optional `GOOGLE_APPLICATION_CREDENTIALS` for Vertex; otherwise
 Set `CLAUDE_MODEL` explicitly for native API calls; relying on Claude Code's
 implicit model default is no longer sufficient. The Helm deployment already
 sets this value.
-Vertex's documented dated IDs are used for Claude 4.5 model aliases. The
-deployment's Vertex organization policy must permit the `structured_outputs`
+`CLAUDE_MODEL` is passed unchanged to the selected backend. Set its exact
+provider-native model ID, for example `claude-haiku-4-5@20251001` on Vertex.
+Configurations relying on the previous Claude 4.5 alias or date conversion
+must update that value before deployment.
+The deployment's Vertex organization policy must permit the `structured_outputs`
 partner-model feature, or an Anthropic-compatible gateway must forward
 `output_config.format`; an unsupported backend fails without silently disabling
 schema constraints. Install the updated runtime dependencies before deployment.

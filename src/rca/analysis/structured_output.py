@@ -6,7 +6,6 @@ import asyncio
 import copy
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,11 +15,6 @@ from rca.config import Config
 logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_TOKENS = 16384
-_VERTEX_MODEL_ALIASES = {
-    "claude-haiku-4-5": "claude-haiku-4-5@20251001",
-    "claude-sonnet-4-5": "claude-sonnet-4-5@20250929",
-    "claude-opus-4-5": "claude-opus-4-5@20251101",
-}
 
 
 @dataclass(frozen=True)
@@ -69,11 +63,6 @@ def _enabled(environment: Mapping[str, str], name: str) -> bool:
     return environment.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _vertex_model(model: str) -> str:
-    model = _VERTEX_MODEL_ALIASES.get(model, model)
-    return re.sub(r"^(claude-.+)-(\d{8})$", r"\1@\2", model)
-
-
 def _load_vertex_credentials(path: str) -> tuple[Any, str | None]:
     try:
         import google.auth
@@ -110,7 +99,7 @@ async def _create_client(anthropic: Any, config: Config) -> tuple[Any, str, str]
             kwargs["credentials"] = credentials
             if not project and credentials_project:
                 kwargs["project_id"] = credentials_project
-        return anthropic.AsyncAnthropicVertex(**kwargs), _vertex_model(model), "vertex"
+        return anthropic.AsyncAnthropicVertex(**kwargs), model, "vertex"
 
     if any(
         _enabled(environment, name)

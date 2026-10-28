@@ -122,18 +122,18 @@ def test_native_request_uses_output_config_and_preserves_canonical_schema(
 
 
 @pytest.mark.parametrize(
-    ("model", "expected"),
+    "model",
     [
-        ("claude-haiku-4-5", "claude-haiku-4-5@20251001"),
-        ("claude-sonnet-4-5", "claude-sonnet-4-5@20250929"),
-        ("claude-opus-4-5", "claude-opus-4-5@20251101"),
-        ("claude-haiku-4-5-20251001", "claude-haiku-4-5@20251001"),
-        ("claude-haiku-4-5@20251001", "claude-haiku-4-5@20251001"),
-        ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5",
+        "claude-opus-4-5",
+        "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5@20251001",
+        "claude-sonnet-4-6",
     ],
 )
-def test_vertex_uses_native_client_and_documented_model_ids(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: str, expected: str
+def test_vertex_passes_configured_model_unchanged_to_native_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: str
 ) -> None:
     api, create = _fake_api(monkeypatch)
 
@@ -149,7 +149,7 @@ def test_vertex_uses_native_client_and_documented_model_ids(
 
     api.AsyncAnthropic.assert_not_called()
     api.AsyncAnthropicVertex.assert_called_once_with(region="global", project_id="test-project")
-    assert create.call_args.kwargs["model"] == expected
+    assert create.call_args.kwargs["model"] == model
     assert create.call_args.kwargs["output_config"]["format"]["type"] == "json_schema"
 
 
@@ -169,6 +169,7 @@ def test_vertex_loads_configured_credentials_without_environment_mutation(
         _config(
             tmp_path,
             CLAUDE_CODE_USE_VERTEX="1",
+            CLAUDE_MODEL="claude-haiku-4-5@20251001",
             CLOUD_ML_REGION="us-east5",
             GOOGLE_APPLICATION_CREDENTIALS=str(credentials_path),
         )
@@ -224,6 +225,7 @@ def test_installed_vertex_sdk_serializes_native_output_config(
         _config(
             tmp_path,
             CLAUDE_CODE_USE_VERTEX="1",
+            CLAUDE_MODEL="claude-haiku-4-5@20251001",
             CLOUD_ML_REGION="global",
             ANTHROPIC_VERTEX_PROJECT_ID="test-project",
         )
