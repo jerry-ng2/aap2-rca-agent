@@ -1,18 +1,20 @@
-Analyze AAP job $job_id using the existing artifacts.
+Analyze AAP job $job_id using the existing artifacts in `$analysis_dir`.
 
-Use the exact string `"$job_id"` for `job_id`. Follow the full JSON Schema below
-for both the saved file and your final structured output. The required
-top-level fields are `job_id`, `root_cause`, `correlation`, and `evidence`.
-Submit the complete object itself, without a `findings`, `level`, or other
-wrapper. Omit unavailable optional fields when their schema does not allow
-`null`.
+Investigate the failure and return concise findings grounded in these artifacts.
+Include the root cause, confidence, correlation identifiers, evidence, and
+actionable recommendations. Include the exact job ID `"$job_id"`.
 
-Write the complete summary to `$summary_path`, then read it back and check it
-against the schema. Submit that same JSON object as your final structured
-output. If validation reports a problem, correct the saved file before
-resubmitting it.
+Every evidence entry requires `source`, `timestamp`, and `message`, including
+GitHub evidence. For configuration or code with no event timestamp in the
+artifacts, use `"timestamp": ""` to indicate that the time is unavailable;
+never invent a timestamp. Include `github_path` for GitHub evidence.
 
-JSON Schema:
+The orchestrator will supply your findings and the artifacts to a separate
+Messages API request with a schema-constrained response format. That request
+produces the final structured output. Python validates the response and writes
+`$summary_path`. Do not write that file yourself or upload the analysis.
+
+Use this summary schema to identify what evidence the final response needs:
 
 ```json
 $summary_schema

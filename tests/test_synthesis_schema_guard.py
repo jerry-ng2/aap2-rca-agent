@@ -1,4 +1,4 @@
-"""Regression tests for schema submission and terminal SDK errors."""
+"""Regression tests for schema guidance and failed SDK investigations."""
 
 from __future__ import annotations
 
@@ -6,10 +6,9 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import claude_agent_sdk
-import jsonschema
 import pytest
 
 from rca.analysis.pipeline import AnalysisArtifacts
@@ -76,120 +75,18 @@ def _terminal_message(*, is_error: bool = True) -> SimpleNamespace:
     )
 
 
-def test_guard_submits_the_validated_file_instead_of_model_findings(tmp_path: Path) -> None:
-    artifacts = _artifacts(tmp_path)
-    path = _save(artifacts, _summary())
-
-    result = asyncio.run(
-        orchestrator._guard_summary_output(
-            {"tool_name": "StructuredOutput", "tool_input": {"findings": []}},
-            "output-call",
-            {"signal": None},
-            artifacts=artifacts,
-        )
-    )["hookSpecificOutput"]
-
-    assert result["permissionDecision"] == "allow"
-    submitted = result["updatedInput"]
-    assert submitted["job_id"] == "101"
-    assert "findings" not in submitted
-    assert submitted["correlation"]["identifiers"] == {"guid": "guid-1"}
-    assert json.loads(path.read_text()) == submitted
-    jsonschema.validate(submitted, orchestrator._SUMMARY_OUTPUT_SCHEMA)
-
-
-@pytest.mark.parametrize(
-    "file_state", ["missing", "invalid_json", "invalid_shape", "wrong_job"]
-)
-def test_guard_blocks_unusable_files_with_repair_feedback(
-    tmp_path: Path, file_state: str
-) -> None:
-    artifacts = _artifacts(tmp_path)
-    path = artifacts.analysis_dir / "step5_analysis_summary.json"
-    if file_state == "invalid_json":
-        path.write_text("{", encoding="utf-8")
-    elif file_state == "invalid_shape":
-        _save(artifacts, {"findings": []})
-    elif file_state == "wrong_job":
-        _save(artifacts, _summary("202"))
-    original = path.read_text() if path.exists() else None
-
-    result = asyncio.run(
-        orchestrator._guard_summary_output(
-            {"tool_name": "StructuredOutput", "tool_input": _summary()},
-            "output-call",
-            {"signal": None},
-            artifacts=artifacts,
-        )
-    )["hookSpecificOutput"]
-
-    assert result["permissionDecision"] == "deny"
-    assert "updatedInput" not in result
-    assert str(path) in result["permissionDecisionReason"]
-    assert "Correct" in result["permissionDecisionReason"]
-    assert "StructuredOutput" in result["permissionDecisionReason"]
-    assert (path.read_text() if path.exists() else None) == original
-
-
-def test_guard_does_not_intercept_other_tools(tmp_path: Path) -> None:
-    assert asyncio.run(
-        orchestrator._guard_summary_output(
-            {"tool_name": "Read", "tool_input": {}},
-            "read-call",
-            {"signal": None},
-            artifacts=_artifacts(tmp_path),
-        )
-    ) == {}
-
-
-def test_concurrent_sdk_hooks_submit_only_their_own_job_file(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    artifacts = [_artifacts(tmp_path, job_id) for job_id in ["101", "202"]]
-    callbacks = []
-    for artifact in artifacts:
-        _save(artifact, _summary(artifact.job_id))
-        options = orchestrator._make_sdk_options(
-            claude_agent_sdk,
-            config,
-            cwd=tmp_path,
-            system_prompt=orchestrator.RCA_INSTRUCTIONS,
-            output_format=orchestrator._SUMMARY_OUTPUT_FORMAT,
-            summary_artifacts=artifact,
-        )
-        matcher = options.hooks["PreToolUse"][0]
-        assert matcher.matcher == "^StructuredOutput$"
-        callbacks.append(matcher.hooks[0])
-
-    async def submit():
-        return await asyncio.gather(
-            *(
-                callback(
-                    {"tool_name": "StructuredOutput", "tool_input": {"findings": []}},
-                    None,
-                    {"signal": None},
-                )
-                for callback in callbacks
-            )
-        )
-
-    results = asyncio.run(submit())
-    assert [
-        result["hookSpecificOutput"]["updatedInput"]["job_id"] for result in results
-    ] == ["101", "202"]
-
-
 def test_synthesis_prompt_includes_the_exact_packaged_schema(tmp_path: Path) -> None:
     prompt = orchestrator._synthesis_prompt("101", _artifacts(tmp_path))
     schema_text = prompt.split("```json\n", 1)[1].split("```", 1)[0]
 
     assert json.loads(schema_text) == orchestrator._SUMMARY_OUTPUT_SCHEMA
-    assert 'Use the exact string `"101"`' in prompt
-    assert "without a `findings`, `level`, or other" in prompt
+    assert 'Include the exact job ID `"101"`' in prompt
+    assert "StructuredOutput" not in prompt
 
 
 @pytest.mark.parametrize("file_state", ["valid", "invalid", "missing", "stale", "wrong_job"])
 @pytest.mark.parametrize("error_site", ["stream", "cleanup"])
-def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summary(
+def test_terminal_sdk_error_cannot_recover_from_a_model_written_summary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     file_state: str,
@@ -204,7 +101,6 @@ def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summa
 
     class FakeSDK:
         ResultError = claude_agent_sdk.ResultError
-        HookMatcher = claude_agent_sdk.HookMatcher
         ClaudeAgentOptions = SimpleNamespace
 
         class ClaudeSDKClient:
@@ -243,6 +139,8 @@ def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summa
 
     monkeypatch.setattr(orchestrator, "_load_agent_sdk", FakeSDK)
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
+    native_generator = AsyncMock()
+    monkeypatch.setattr(orchestrator, "generate_structured_output", native_generator)
     upload = Mock(return_value=True)
     monkeypatch.setattr(orchestrator, "upload_to_jumpbox", upload)
 
@@ -256,32 +154,18 @@ def test_terminal_error_then_sdk_exception_recovers_only_a_valid_fresh_job_summa
     assert len(clients) == 1
     assert clients[0].queried
     assert clients[0].exited
-    if file_state == "valid":
-        assert execution.status == "completed"
-        assert execution.summary["job_id"] == "101"
-        path = artifacts.analysis_dir / "step5_analysis_summary.json"
-        assert json.loads(path.read_text()) == execution.summary
-        jsonschema.validate(json.loads(path.read_text()), orchestrator._SUMMARY_OUTPUT_SCHEMA)
-        upload.assert_called_once_with(
-            "101",
-            artifacts.analysis_dir,
-            jumpbox_uri=config.jumpbox_uri,
-            session_id="job-session",
-            ssh_jumpbox_alias="ci-jumpbox",
-        )
-    else:
-        assert execution.status == "failed"
-        assert "structured output failed" in execution.error
-        upload.assert_not_called()
-        if file_state in ["missing", "stale"]:
-            assert not (artifacts.analysis_dir / "step5_analysis_summary.json").exists()
+    assert execution.status == "failed"
+    assert "structured output failed" in execution.error
+    native_generator.assert_not_awaited()
+    upload.assert_not_called()
+    assert not (artifacts.analysis_dir / "step5_analysis_summary.json").exists()
 
 
 @pytest.mark.parametrize(
     "failure_mode", ["no_terminal", "success_terminal", "transport_error"]
 )
 @pytest.mark.parametrize("error_site", ["stream", "cleanup"])
-def test_sdk_recovery_does_not_swallow_unrelated_failures(
+def test_sdk_queries_propagate_unrelated_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     failure_mode: str,
