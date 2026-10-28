@@ -17,11 +17,13 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import jsonschema
 
 from rca.analysis.pipeline import AnalysisArtifacts
 from rca.analysis import tracing
 from rca.batch import orchestrator
 from rca.config import Config
+from rca.models import AnalysisSummary, BatchSemanticOutput
 
 
 def _config(tmp_path: Path, *, max_parallel_jobs: int = 2) -> Config:
@@ -123,7 +125,6 @@ def test_packaged_prompts_load_without_filesystem_discovery() -> None:
         "root_cause_analysis.md": orchestrator.RCA_INSTRUCTIONS,
         "synthesis.md": orchestrator._SYNTHESIS_PROMPT_TEMPLATE.template,
         "semantic.md": orchestrator._SEMANTIC_PROMPT_TEMPLATE.template,
-        "structured_summary.md": orchestrator._STRUCTURED_SUMMARY_TEMPLATE.template,
     }
 
     for filename, prompt in prompt_files.items():
@@ -147,9 +148,6 @@ def test_packaged_prompts_load_without_filesystem_discovery() -> None:
     assert "mcp__github__search_code" in prompt_files["root_cause_analysis.md"]
     assert "$job_id" in prompt_files["synthesis.md"]
     assert "$analysis_dir" in prompt_files["synthesis.md"]
-    assert "$job_id" in prompt_files["structured_summary.md"]
-    assert "$artifacts" in prompt_files["structured_summary.md"]
-    assert "$findings" in prompt_files["structured_summary.md"]
     assert "$job_summaries" in prompt_files["semantic.md"]
     assert "$known_issues" in prompt_files["semantic.md"]
 
@@ -206,20 +204,39 @@ def test_semantic_sdk_options_disable_tools_and_skill_discovery(
     assert "allowed_tools" not in options
 
 
-def test_semantic_schema_reaches_sdk_options(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("schema", "system_prompt", "expected_tools"),
+    [
+        (AnalysisSummary.model_json_schema(), orchestrator.RCA_INSTRUCTIONS, None),
+        (BatchSemanticOutput.model_json_schema(), None, []),
+    ],
+)
+def test_model_generated_schema_reaches_sdk_options_unchanged(
+    tmp_path: Path, schema: dict, system_prompt: str | None, expected_tools: list | None
+) -> None:
     sdk = pytest.importorskip("claude_agent_sdk")
-    output_format = {"type": "json_schema", "schema": orchestrator._SEMANTIC_OUTPUT_SCHEMA}
+    original_schema = json.loads(json.dumps(schema))
+    output_format = {"type": "json_schema", "schema": schema}
 
     options = orchestrator._make_sdk_options(
         sdk,
         _config(tmp_path),
         cwd=tmp_path,
-        system_prompt=None,
+        system_prompt=system_prompt,
         output_format=output_format,
     )
 
     assert options.output_format == output_format
-    assert options.output_format["schema"] == orchestrator._SEMANTIC_OUTPUT_SCHEMA
+    assert options.output_format["schema"] is schema
+    assert schema == original_schema
+    assert options.tools == expected_tools
+    if system_prompt is None:
+        assert options.allowed_tools == ["StructuredOutput"]
+    else:
+        assert options.allowed_tools == [
+            "Bash", "Read", "Write", "mcp__github__search_code",
+            "mcp__github__get_file_contents", "StructuredOutput",
+        ]
 
 
 def test_synthesis_prompt_does_not_invoke_a_skill(tmp_path: Path) -> None:
@@ -231,7 +248,6 @@ def test_synthesis_prompt_does_not_invoke_a_skill(tmp_path: Path) -> None:
     assert "Skill" not in prompt
     assert "Analyze AAP job 123" in prompt
     assert str(analysis_dir) in prompt
-    assert "StructuredOutput" not in prompt
     assert "$analysis_dir" not in prompt
 
 
@@ -247,87 +263,42 @@ def test_semantic_prompt_renders_packaged_data() -> None:
     assert "$known_issues" not in prompt
 
 
-def test_step5_summary_rejects_schema_invalid_output() -> None:
-    with pytest.raises(ValueError, match="Step 5 summary failed schema validation"):
-        orchestrator._validate_step5_summary({"root_cause": {"summary": "Incomplete"}}, "123")
-
-
-def test_step5_summary_omits_null_optional_fields() -> None:
-    summary = {
-        "job_id": "123",
-        "root_cause": {
-            "summary": "Unknown cause",
-            "category": "unknown",
-            "confidence": "low",
-        },
-        "correlation": {
-            "method": "none",
-            "identifiers": {
-                "guid": "guid-1",
-                "namespace": None,
-                "pod_name": None,
-            },
-            "time_overlap": {
-                "aap_job_start": "2026-10-22T19:00:00Z",
-                "aap_job_end": "2026-10-22T19:01:00Z",
-                "splunk_first_error": None,
-                "splunk_last_error": None,
-                "overlap_confirmed": False,
-            },
-        },
-        "evidence": [
+def test_step5_persistence_preserves_nested_nullable_fields_and_extra_content(tmp_path: Path) -> None:
+    summary = _summary("123")
+    summary.update(
+        analyzed_at=None,
+        recommendations=[
             {
-                "source": "aap_job",
-                "timestamp": "2026-10-22T19:00:00Z",
-                "message": "Task failed",
-                "github_path": None,
+                "action": None,
+                "priority": None,
+                "evidence_ref": None,
+                "fix": {"status": "proposed", "base_sha": "abc", "diff": None, "pr_link": None},
+            },
+            {"details": None, "evidence_ref": None, "fix": None},
+        ],
+        causal_chain=[
+            {"step": 1, "relationship": "direct_cause", "statement": "Failure", "evidence_ref": None}
+        ],
+        misidentifications=[
+            {
+                "theory": "DNS",
+                "why_suspected": "Connection failed",
+                "why_ruled_out": "Resolution succeeded",
+                "evidence_ref": None,
             }
         ],
-        "recommendations": [
-            {"priority": None, "action": "Gather more evidence", "evidence_ref": None}
-        ],
-    }
-    result = orchestrator._validate_step5_summary(summary, "123")
+        extra_context={"unavailable": None, "nested": [{"value": None}]},
+    )
+    summary["evidence"][0]["github_path"] = None
+    summary["evidence"][0]["extra_details"] = {"unavailable": None}
+    original = json.loads(json.dumps(summary))
 
-    identifiers = result["correlation"]["identifiers"]
-    time_overlap = result["correlation"]["time_overlap"]
-    assert identifiers == {"guid": "guid-1"}
-    assert "splunk_first_error" not in time_overlap
-    assert "splunk_last_error" not in time_overlap
-    assert time_overlap["aap_job_start"] == "2026-10-22T19:00:00Z"
-    assert time_overlap["overlap_confirmed"] is False
-    assert "github_path" not in result["evidence"][0]
-    assert result["recommendations"] == [
-        {"action": "Gather more evidence", "evidence_ref": None}
-    ]
+    artifacts = AnalysisArtifacts("123", tmp_path, {}, {}, {}, {})
+    orchestrator._write_step5_summary(artifacts, summary)
 
-
-def test_step5_summary_preserves_null_required_fields() -> None:
-    summary = {
-        "job_id": "123",
-        "root_cause": {
-            "summary": None,
-            "category": "unknown",
-            "confidence": "low",
-        },
-        "correlation": {
-            "method": None,
-            "identifiers": {"guid": "guid-1", "pod_name": None},
-        },
-        "evidence": [
-            {
-                "source": "aap_job",
-                "timestamp": "2026-10-22T19:00:00Z",
-                "message": "Task failed",
-            }
-        ],
-    }
-
-    normalized = orchestrator._normalize_step5_summary(summary)
-
-    assert normalized["root_cause"]["summary"] is None
-    assert normalized["correlation"]["method"] is None
-    assert "pod_name" not in normalized["correlation"]["identifiers"]
+    saved = json.loads((tmp_path / "step5_analysis_summary.json").read_text())
+    assert saved == original
+    assert summary == original
 
 
 def test_sdk_result_usage_and_semaphore_limit(
@@ -419,169 +390,60 @@ def test_sdk_result_usage_and_semaphore_limit(
     assert results[0].session_id == "session-test"
     assert all(item["system_prompt"] == orchestrator.RCA_INSTRUCTIONS for item in option_values)
     assert all(item["output_format"] == output_format for item in option_values)
+    assert all("StructuredOutput" in item["allowed_tools"] for item in option_values)
 
 
-def test_synthesis_investigates_before_native_structured_output(
+def test_synthesis_passes_the_model_generated_schema_to_a_single_sdk_query(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _config(tmp_path)
     analysis_dir = config.analysis_dir / "101"
-    analysis_dir.mkdir(parents=True)
     artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    for filename in (
-        "step1_job_context.json",
-        "step2_splunk_logs.json",
-        "step3_correlation.json",
-        "step4_github_fetch_history.json",
-    ):
-        (analysis_dir / filename).write_text("{}", encoding="utf-8")
-    calls: list[str] = []
-    native_requests: list[dict[str, object]] = []
-    original_schema = json.loads(json.dumps(orchestrator._SUMMARY_OUTPUT_SCHEMA))
-
-    async def investigate(prompt: str, query_config: Config, **kwargs: object):
-        calls.append("investigation")
-        assert query_config is config
-        assert kwargs.get("output_format") is None
-        assert kwargs.get("summary_job_id") is None
-        assert kwargs["system_prompt"] == orchestrator.RCA_INSTRUCTIONS
-        assert "StructuredOutput" not in prompt
-        (analysis_dir / "step4_github_fetch_history.json").write_text(
-            json.dumps({"mcp_findings": "native evidence after verification"}),
-            encoding="utf-8",
-        )
-        return orchestrator.SDKQueryResult(
-            False,
-            0.02,
-            {"input_tokens": 20},
-            "Verified the failing resource against GitHub",
-            model_usage={"investigator": {"inputTokens": 20, "costUSD": 0.02}},
-            session_id="investigation-session",
-        )
-
-    async def generate(prompt: str, query_config: Config, **kwargs: object):
-        calls.append("native")
-        assert query_config is config
-        native_requests.append({"prompt": prompt, **kwargs})
-        return SimpleNamespace(
-            data=_summary("101"),
-            usage={"input_tokens": 5, "output_tokens": 12},
-            model="native-model",
-        )
-
-    monkeypatch.setattr(orchestrator, "_run_sdk_query", investigate)
-    monkeypatch.setattr(orchestrator, "generate_structured_output", generate)
+    prompt = orchestrator._synthesis_prompt("101", artifacts)
+    semaphore = asyncio.Semaphore(1)
+    original_schema = AnalysisSummary.model_json_schema()
+    sdk_result = orchestrator.SDKQueryResult(
+        False,
+        0.02,
+        {"input_tokens": 20, "output_tokens": 5},
+        "Summary returned",
+        model_usage={"claude-test": {"inputTokens": 20, "costUSD": 0.02}},
+        structured_output=_summary("101"),
+        session_id="synthesis-session",
+    )
+    query = AsyncMock(return_value=sdk_result)
+    monkeypatch.setattr(orchestrator, "_run_sdk_query", query)
 
     result = asyncio.run(
         orchestrator._run_synthesis(
-            orchestrator._synthesis_prompt("101", artifacts),
+            prompt,
             config,
             artifacts=artifacts,
             cwd=tmp_path,
-            semaphore=asyncio.Semaphore(1),
+            semaphore=semaphore,
             summary_job_id="101",
         )
     )
 
-    assert calls == ["investigation", "native"]
-    assert result.is_error is False
-    assert result.structured_output == _summary("101")
-    assert result.session_id == "investigation-session"
-    assert result.usage == {"input_tokens": 25, "output_tokens": 12}
-    assert result.cost_usd is None
-    assert "costUSD" not in result.model_usage["investigator"]
-    assert native_requests[0]["schema"] == original_schema
+    expected_schema = json.loads(json.dumps(original_schema))
+    expected_schema["properties"]["job_id"]["enum"] = ["101"]
+    query.assert_awaited_once_with(
+        prompt,
+        config,
+        cwd=tmp_path,
+        semaphore=semaphore,
+        system_prompt=orchestrator.RCA_INSTRUCTIONS,
+        output_format={"type": "json_schema", "schema": expected_schema},
+    )
+    schema = query.await_args.kwargs["output_format"]["schema"]
+    validator = jsonschema.Draft202012Validator(schema)
+    validator.validate(_summary("101"))
+    assert not validator.is_valid(_summary("999"))
     assert orchestrator._SUMMARY_OUTPUT_SCHEMA == original_schema
-    assert "Verified the failing resource against GitHub" in native_requests[0]["prompt"]
-    assert "native evidence after verification" in native_requests[0]["prompt"]
+    assert result is sdk_result
 
 
-def test_synthesis_corrects_native_output_against_original_job_id(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _config(tmp_path)
-    analysis_dir = config.analysis_dir / "101"
-    analysis_dir.mkdir(parents=True)
-    artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    investigation = AsyncMock(
-        return_value=orchestrator.SDKQueryResult(False, 0.02, {}, "Investigated artifacts")
-    )
-    generator = AsyncMock(
-        side_effect=[
-            SimpleNamespace(data=_summary("999"), usage={"output_tokens": 5}, model="native"),
-            SimpleNamespace(data=_summary("101"), usage={"output_tokens": 8}, model="native"),
-        ]
-    )
-    monkeypatch.setattr(orchestrator, "_run_sdk_query", investigation)
-    monkeypatch.setattr(orchestrator, "generate_structured_output", generator)
-
-    result = asyncio.run(
-        orchestrator._run_synthesis(
-            orchestrator._synthesis_prompt("101", artifacts),
-            config,
-            artifacts=artifacts,
-            cwd=tmp_path,
-            semaphore=asyncio.Semaphore(1),
-            summary_job_id="101",
-        )
-    )
-
-    investigation.assert_awaited_once()
-    assert generator.await_count == 2
-    assert result.structured_output == _summary("101")
-    assert result.usage["output_tokens"] == 13
-    assert "job_id" in generator.await_args_list[1].args[0]
-    assert "999" in generator.await_args_list[1].args[0]
-    assert all(
-        call.kwargs["schema"] == orchestrator._SUMMARY_OUTPUT_SCHEMA
-        for call in generator.await_args_list
-    )
-
-
-def test_successful_native_summary_is_validated_once_before_writing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _config(tmp_path)
-    analysis_dir = config.analysis_dir / "101"
-    analysis_dir.mkdir(parents=True)
-    artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    native_summary = _summary("101")
-    native_summary["evidence"][0]["github_path"] = None
-    validator = Mock(wraps=orchestrator._validate_step5_summary)
-    original_write = orchestrator._write_step5_summary
-
-    def write_summary(saved_artifacts: AnalysisArtifacts, summary: dict[str, object]) -> None:
-        validator.assert_called_once_with(native_summary, "101")
-        assert summary == _summary("101")
-        original_write(saved_artifacts, summary)
-
-    writer = Mock(side_effect=write_summary)
-    monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
-    monkeypatch.setattr(
-        orchestrator,
-        "_run_sdk_query",
-        AsyncMock(return_value=orchestrator.SDKQueryResult(False, 0.02, {}, "Investigated artifacts")),
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "generate_structured_output",
-        AsyncMock(return_value=SimpleNamespace(data=native_summary, usage={}, model="native")),
-    )
-    monkeypatch.setattr(orchestrator, "_validate_step5_summary", validator)
-    monkeypatch.setattr(orchestrator, "_write_step5_summary", writer)
-    monkeypatch.setattr(orchestrator, "upload_to_jumpbox", Mock(return_value=True))
-
-    execution = asyncio.run(
-        orchestrator._analyze_jobs([101], config, object(), cwd=tmp_path)
-    )[0]
-
-    assert execution.status == "completed", execution.error
-    validator.assert_called_once_with(native_summary, "101")
-    writer.assert_called_once_with(artifacts, _summary("101"))
-    assert json.loads((analysis_dir / "step5_analysis_summary.json").read_text()) == _summary("101")
-
-
-@pytest.mark.parametrize("failure", ["investigation", "native_request", "native_validation"])
+@pytest.mark.parametrize("failure", ["sdk_error", "missing_output", "transport_error"])
 def test_synthesis_failures_do_not_write_or_upload_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
 ) -> None:
@@ -589,19 +451,20 @@ def test_synthesis_failures_do_not_write_or_upload_summary(
     analysis_dir = config.analysis_dir / "101"
     analysis_dir.mkdir(parents=True)
     artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    investigation = AsyncMock(
+    query = AsyncMock(
+        side_effect=RuntimeError("SDK transport failed") if failure == "transport_error" else None,
         return_value=orchestrator.SDKQueryResult(
-            failure == "investigation", 0.02, {}, "Investigated artifacts"
-        )
-    )
-    generator = AsyncMock(
-        side_effect=RuntimeError("Native request failed") if failure == "native_request" else None,
-        return_value=SimpleNamespace(data=_summary("999"), usage={}, model="native"),
+            failure == "sdk_error",
+            0.02,
+            {},
+            "SDK request failed",
+            structured_output=_summary("101") if failure == "sdk_error" else None,
+            errors=("SDK request failed",) if failure == "sdk_error" else (),
+        ),
     )
     uploader = Mock(return_value=True)
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
-    monkeypatch.setattr(orchestrator, "_run_sdk_query", investigation)
-    monkeypatch.setattr(orchestrator, "generate_structured_output", generator)
+    monkeypatch.setattr(orchestrator, "_run_sdk_query", query)
     monkeypatch.setattr(orchestrator, "upload_to_jumpbox", uploader)
 
     execution = asyncio.run(
@@ -609,13 +472,9 @@ def test_synthesis_failures_do_not_write_or_upload_summary(
     )[0]
 
     assert execution.status == "failed"
+    query.assert_awaited_once()
     assert not (analysis_dir / "step5_analysis_summary.json").exists()
     uploader.assert_not_called()
-    if failure == "investigation":
-        generator.assert_not_awaited()
-    elif failure == "native_validation":
-        assert generator.await_count == 3
-        assert "job_id" in execution.error
 
 
 def test_job_failures_are_isolated_from_other_jobs(
@@ -1430,7 +1289,7 @@ def test_normalize_semantics_picks_numeric_min_pattern_id() -> None:
     assert normalized["cross_job_patterns"][0]["pattern_id"] == "9"
 
 
-def test_aggregate_semantics_uses_packaged_output_schema(
+def test_aggregate_semantics_uses_model_generated_output_schema(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     query_result = orchestrator.SDKQueryResult(
@@ -1458,12 +1317,7 @@ def test_aggregate_semantics_uses_packaged_output_schema(
         )
     )
 
-    expected_schema = json.loads(
-        files("rca")
-        .joinpath("schemas")
-        .joinpath("batch_semantic_output.schema.json")
-        .read_text(encoding="utf-8")
-    )
+    expected_schema = BatchSemanticOutput.model_json_schema()
     assert cross_patterns == []
     assert result is query_result
     assert sdk_query.call_args.kwargs["output_format"] == {
@@ -1472,8 +1326,9 @@ def test_aggregate_semantics_uses_packaged_output_schema(
     }
 
 
+@pytest.mark.parametrize("failure", ["unavailable", "invalid_output"])
 def test_semantic_failure_falls_back_to_deterministic_matching(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
 ) -> None:
     artifacts = AnalysisArtifacts(
         job_id="201",
@@ -1505,11 +1360,22 @@ def test_semantic_failure_falls_back_to_deterministic_matching(
         "recurrence_count": 2,
         "pattern_id": "9",
     }
-    monkeypatch.setattr(
-        orchestrator,
-        "_aggregate_semantics",
-        AsyncMock(side_effect=RuntimeError("semantic unavailable")),
-    )
+    if failure == "unavailable":
+        monkeypatch.setattr(
+            orchestrator,
+            "_aggregate_semantics",
+            AsyncMock(side_effect=RuntimeError("semantic unavailable")),
+        )
+    else:
+        monkeypatch.setattr(
+            orchestrator,
+            "_run_sdk_query",
+            AsyncMock(
+                return_value=orchestrator.SDKQueryResult(
+                    False, None, {}, "", structured_output={"historical_matches": []}
+                )
+            ),
+        )
 
     summaries, cross_patterns, aggregation_result = orchestrator._run_agent_batch(
         [execution], [known_issue], _config(tmp_path), cwd=tmp_path

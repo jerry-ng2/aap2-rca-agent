@@ -25,7 +25,7 @@ flowchart TD
       Splunk[Query Splunk]
       Correlation[Build correlation timeline]
       GitHub[Fetch AgnosticV config and AgnosticD code]
-      Synthesis[Claude Code investigates; Messages API generates schema-constrained summary]
+      Synthesis[Agent SDK investigates and returns structured summary]
       Upload[Upload analysis to Jumpbox]
       Parse --> Splunk --> Correlation --> GitHub --> Synthesis --> Upload
     end
@@ -79,38 +79,27 @@ Use `--no-pre-filter` to skip matching jobs against recent known issues.
 queries (default `5`). The Step 6 Jira ticket preparation hook is intentionally
 a no-op for now; no Jira integration or ticket creation is performed.
 
-Per-job synthesis uses Claude Code to investigate artifacts and verify GitHub
-evidence, then calls the Messages API's
-[native structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
-with `output_config.format`. The final API request receives the investigation
-findings and artifact contents; Claude Code does not submit the summary through
-its `StructuredOutput` tool. Python derives an API-compatible schema in memory
-without modifying packaged schemas, then validates each response once against
-the original schema and requested job ID before atomically writing
-`step5_analysis_summary.json`.
-Application validation errors allow up to two further constrained API requests.
-API failures, refusals, and truncated responses fail the job without accepting
-an unconstrained response or model-written summary file.
+Per-job synthesis uses one Claude Agent SDK query to investigate artifacts,
+verify GitHub evidence, and return the final summary. Python generates the
+response schema from `AnalysisSummary.model_json_schema()`, constrains `job_id`
+to the requested job, and passes it through the SDK's `output_format` option.
+The SDK owns structured-output validation and
+retries through its `StructuredOutput` tool. Python atomically writes the
+successful `structured_output` to `step5_analysis_summary.json` and performs and
+verifies upload. An SDK error or missing structured result fails the job.
+See the [Agent SDK structured-output documentation](https://code.claude.com/docs/en/agent-sdk/structured-outputs)
+for its validation and error behavior.
 For GitHub configuration or code evidence with no event time in the supplied
 artifacts, an empty `timestamp` string represents unavailable time.
 
-The final API request uses the existing `CLAUDE_MODEL` and backend configuration:
+All Claude model work uses the Agent SDK with the existing `CLAUDE_MODEL` and
+backend configuration:
 `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
 and optional `GOOGLE_APPLICATION_CREDENTIALS` for Vertex; otherwise
 `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` and optional `ANTHROPIC_BASE_URL`.
-Set `CLAUDE_MODEL` explicitly for native API calls; relying on Claude Code's
-implicit model default is no longer sufficient. The Helm deployment already
-sets this value.
-`CLAUDE_MODEL` is passed unchanged to the selected backend. Set its exact
-provider-native model ID, for example `claude-haiku-4-5@20251001` on Vertex.
-Configurations relying on the previous Claude 4.5 alias or date conversion
-must update that value before deployment.
-The deployment's Vertex organization policy must permit the `structured_outputs`
-partner-model feature, or an Anthropic-compatible gateway must forward
-`output_config.format`; an unsupported backend fails without silently disabling
-schema constraints. Install the updated runtime dependencies before deployment.
-Native API token usage is included in telemetry. Total USD estimates are omitted
-when the native API does not supply costs, rather than reporting a partial total.
+`CLAUDE_MODEL` is passed unchanged to the SDK; when it is unset, the SDK uses its
+default model. The Helm deployment sets an explicit model. Token usage and cost
+estimates come from the SDK's terminal result and model usage.
 
 ## Configuration and state
 
@@ -133,8 +122,20 @@ Important settings include:
 - `RCA_MAX_PARALLEL_JOBS` for bounded batch concurrency (default `5`).
 
 Batch reports are written to `$RCA_STATE_DIR/reports/`. Per-job artifacts are
-stored under `$RCA_STATE_DIR/.analysis/{job_id}/`. JSON schemas are included as
-package resources and loaded with `importlib.resources`.
+stored under `$RCA_STATE_DIR/.analysis/{job_id}/`.
+
+`rca.models` provides Pydantic models for all seven JSON artifact contracts.
+These define generated summaries, raw semantic aggregation responses, final
+batch reports, and assembled root-cause details. Per-job synthesis and semantic
+aggregation derive response schemas from `AnalysisSummary` and
+`BatchSemanticOutput` with `model_json_schema()` and pass them to the Agent SDK. There are
+no separately maintained JSON schema files. Models preserve rules for required
+fields, nullable values, extra properties, and strict JSON types. Step 5 uses the
+SDK's validated structured result directly; other model validation keeps the
+original output dictionaries. Callers serializing
+models should use `model_dump(exclude_unset=True)` to preserve omitted fields.
+Stored root-cause validation retains its existing warning behavior, and invalid
+semantic output uses the existing deterministic matching fallback.
 
 ## Performance
 

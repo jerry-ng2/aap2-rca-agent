@@ -1,4 +1,4 @@
-"""Regression tests for schema guidance and failed SDK investigations."""
+"""Regression tests for schema guidance and failed SDK results."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import claude_agent_sdk
 import pytest
@@ -14,6 +14,7 @@ import pytest
 from rca.analysis.pipeline import AnalysisArtifacts
 from rca.batch import orchestrator
 from rca.config import Config
+from rca.models import AnalysisSummary
 
 
 def _config(tmp_path: Path) -> Config:
@@ -75,13 +76,12 @@ def _terminal_message(*, is_error: bool = True) -> SimpleNamespace:
     )
 
 
-def test_synthesis_prompt_includes_the_exact_packaged_schema(tmp_path: Path) -> None:
+def test_synthesis_prompt_includes_the_model_generated_schema(tmp_path: Path) -> None:
     prompt = orchestrator._synthesis_prompt("101", _artifacts(tmp_path))
     schema_text = prompt.split("```json\n", 1)[1].split("```", 1)[0]
 
-    assert json.loads(schema_text) == orchestrator._SUMMARY_OUTPUT_SCHEMA
+    assert json.loads(schema_text) == AnalysisSummary.model_json_schema()
     assert 'Include the exact job ID `"101"`' in prompt
-    assert "StructuredOutput" not in prompt
 
 
 @pytest.mark.parametrize("file_state", ["valid", "invalid", "missing", "stale", "wrong_job"])
@@ -139,8 +139,6 @@ def test_terminal_sdk_error_cannot_recover_from_a_model_written_summary(
 
     monkeypatch.setattr(orchestrator, "_load_agent_sdk", FakeSDK)
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
-    native_generator = AsyncMock()
-    monkeypatch.setattr(orchestrator, "generate_structured_output", native_generator)
     upload = Mock(return_value=True)
     monkeypatch.setattr(orchestrator, "upload_to_jumpbox", upload)
 
@@ -154,9 +152,10 @@ def test_terminal_sdk_error_cannot_recover_from_a_model_written_summary(
     assert len(clients) == 1
     assert clients[0].queried
     assert clients[0].exited
+    assert clients[0].options.output_format["schema"]["properties"]["job_id"]["enum"] == ["101"]
+    assert "StructuredOutput" in clients[0].options.allowed_tools
     assert execution.status == "failed"
     assert "structured output failed" in execution.error
-    native_generator.assert_not_awaited()
     upload.assert_not_called()
     assert not (artifacts.analysis_dir / "step5_analysis_summary.json").exists()
 

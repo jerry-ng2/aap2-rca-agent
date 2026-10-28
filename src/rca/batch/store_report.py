@@ -8,26 +8,18 @@ import json
 import os
 import sys
 from collections.abc import Mapping
-from importlib.resources import files
 from typing import Any
 
-import jsonschema
 import psycopg2
 import psycopg2.extras
 import psycopg2.sql
+from pydantic import ValidationError
 
 from rca.config import load_database_config
 from rca.database import connect_db
 from rca.batch.match import Confidence, MatchSignals, score_similarity, weakest_confidence
-
-
-
-_ROOT_CAUSE_SCHEMA: dict[str, Any] = json.loads(
-    files("rca")
-    .joinpath("schemas")
-    .joinpath("root_cause.schema.json")
-    .read_text(encoding="utf-8")
-)
+from rca.models import RootCauseDetail
+from rca.models.base import format_validation_errors
 
 
 def _load_step5(analysis_path: str | None, jid: str) -> dict[str, Any] | None:
@@ -136,10 +128,11 @@ def build_root_cause(job: dict[str, Any], jid: str) -> dict[str, Any]:
         "recommendations": _normalize_recommendations(step5.get("recommendations")),
     }
     try:
-        jsonschema.validate(instance=root_cause, schema=_ROOT_CAUSE_SCHEMA)
-    except jsonschema.ValidationError as exc:
+        RootCauseDetail.model_validate(root_cause)
+    except ValidationError as exc:
         print(
-            f"[WARN] job {jid}: assembled root_cause failed schema validation: {exc.message}",
+            f"[WARN] job {jid}: assembled root_cause failed schema validation: "
+            + format_validation_errors(exc),
             file=sys.stderr,
         )
     return root_cause

@@ -1,4 +1,4 @@
-"""Tests for SDK results and native summary validation before persistence."""
+"""Tests for SDK structured results and summary persistence."""
 
 from __future__ import annotations
 
@@ -230,8 +230,11 @@ def test_sdk_stream_exit_preserves_its_terminal_error_without_retrying(
     assert result.model_usage["claude-test"]["costUSD"] == 0.02
 
 
-def test_python_saves_and_uploads_only_the_validated_structured_summary(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "output_kind", ["explicit_null", "wrong_job", "missing_timestamp", "required_null", "incomplete"]
+)
+def test_python_saves_and_uploads_sdk_structured_output_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output_kind: str
 ) -> None:
     config = _config(tmp_path)
     analysis_dir = config.analysis_dir / "101"
@@ -241,95 +244,83 @@ def test_python_saves_and_uploads_only_the_validated_structured_summary(
     stale["root_cause"]["summary"] = "Previous analysis"
     path.write_text(json.dumps(stale), encoding="utf-8")
     artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    canonical = _summary()
-    canonical["evidence"][0]["github_path"] = None
+    output = _summary()
+    if output_kind == "explicit_null":
+        output["evidence"][0]["github_path"] = None
+    elif output_kind == "wrong_job":
+        output["job_id"] = "999"
+    elif output_kind == "missing_timestamp":
+        del output["evidence"][0]["timestamp"]
+    elif output_kind == "required_null":
+        output["root_cause"]["summary"] = None
+    else:
+        output = {"job_id": "101"}
+    expected = json.loads(json.dumps(output))
 
     async def query(*args: object, **kwargs: object):
         assert not path.exists()
-        # A model-written file is not authoritative even when it is schema-valid.
+        # The returned SDK data, rather than a model-written file, is authoritative.
         path.write_text(json.dumps(stale), encoding="utf-8")
-        return orchestrator.SDKQueryResult(False, 0.02, {}, "Investigated artifacts")
+        return orchestrator.SDKQueryResult(
+            False, 0.02, {}, "Summary returned", structured_output=output
+        )
 
     def upload(*args: object, **kwargs: object):
-        assert json.loads(path.read_text()) == _summary()
+        assert json.loads(path.read_text()) == expected
         return True
 
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
-    monkeypatch.setattr(orchestrator, "_run_sdk_query", query)
-    monkeypatch.setattr(
-        orchestrator,
-        "generate_structured_output",
-        AsyncMock(return_value=SimpleNamespace(data=canonical, usage={}, model="native")),
-    )
+    sdk_query = AsyncMock(side_effect=query)
+    monkeypatch.setattr(orchestrator, "_run_sdk_query", sdk_query)
     uploader = Mock(side_effect=upload)
     monkeypatch.setattr(orchestrator, "upload_to_jumpbox", uploader)
 
     execution = asyncio.run(orchestrator._analyze_jobs([101], config, object(), cwd=tmp_path))[0]
 
-    assert execution.status == "completed"
-    assert execution.summary == _summary()
-    assert json.loads(path.read_text()) == execution.summary
+    assert execution.status == "completed", execution.error
+    assert execution.summary is output
+    assert execution.summary == expected
+    assert json.loads(path.read_text()) == expected
+    sdk_query.assert_awaited_once()
     uploader.assert_called_once()
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_summary_rejects_nonfinite_values_even_in_schema_permitted_extra_fields(value: float) -> None:
-    summary = _summary()
-    summary["extra_context"] = {"value": value}
-
-    with pytest.raises(ValueError):
-        orchestrator._validate_step5_summary(summary, "101")
-
-
-@pytest.mark.parametrize(
-    ("problem", "expected_stage", "error_fragment"),
-    [
-        ("missing_output", "skill_execution", "JSON object"),
-        ("wrong_job", "skill_execution", "job_id"),
-        ("missing_timestamp", "skill_execution", "timestamp"),
-        ("required_null", "skill_execution", "root_cause.summary"),
-    ],
-)
-def test_invalid_structured_output_cannot_create_a_summary_or_upload(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    problem: str,
-    expected_stage: str,
-    error_fragment: str,
+@pytest.mark.parametrize("sdk_error", [False, True])
+def test_missing_output_or_sdk_error_cannot_recover_from_a_model_written_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sdk_error: bool
 ) -> None:
     config = _config(tmp_path)
     analysis_dir = config.analysis_dir / "101"
     analysis_dir.mkdir(parents=True)
     artifacts = AnalysisArtifacts("101", analysis_dir, {}, {}, {}, {})
-    summary = _summary()
-    if problem == "wrong_job":
-        summary["job_id"] = "999"
-    elif problem == "missing_timestamp":
-        del summary["evidence"][0]["timestamp"]
-    elif problem == "required_null":
-        summary["root_cause"]["summary"] = None
-    else:
-        summary = None
+    path = analysis_dir / "step5_analysis_summary.json"
 
-    async def investigate(*args: object, **kwargs: object):
-        # A plausible model-written file must not bypass validation of its result.
-        (analysis_dir / "step5_analysis_summary.json").write_text(
-            json.dumps(_summary()), encoding="utf-8"
+    async def query(*args: object, **kwargs: object):
+        path.write_text(json.dumps(_summary()), encoding="utf-8")
+        return orchestrator.SDKQueryResult(
+            sdk_error,
+            0.02,
+            {"input_tokens": 20},
+            json.dumps(_summary()),
+            structured_output=_summary() if sdk_error else None,
+            errors=("SDK request failed",) if sdk_error else (),
         )
-        return orchestrator.SDKQueryResult(False, 0.02, {}, "Investigated artifacts")
 
     monkeypatch.setattr(orchestrator, "run_analysis", Mock(return_value=artifacts))
-    monkeypatch.setattr(orchestrator, "_run_sdk_query", investigate)
-    generator = AsyncMock(return_value=SimpleNamespace(data=summary, usage={}, model="native"))
-    monkeypatch.setattr(orchestrator, "generate_structured_output", generator)
+    sdk_query = AsyncMock(side_effect=query)
+    monkeypatch.setattr(orchestrator, "_run_sdk_query", sdk_query)
     upload = Mock(return_value=True)
     monkeypatch.setattr(orchestrator, "upload_to_jumpbox", upload)
 
     execution = asyncio.run(orchestrator._analyze_jobs([101], config, object(), cwd=tmp_path))[0]
 
     assert execution.status == "failed"
-    assert execution.stage == expected_stage
-    assert error_fragment in execution.error
-    assert generator.await_count == 3
-    assert not (analysis_dir / "step5_analysis_summary.json").exists()
+    assert execution.stage == ("skill_execution" if sdk_error else "step5_missing")
+    assert execution.usage == {"input_tokens": 20}
+    if sdk_error:
+        assert "SDK request failed" in execution.error
+    else:
+        assert "structured output" in execution.error
+    sdk_query.assert_awaited_once()
+    assert not path.exists()
     upload.assert_not_called()
