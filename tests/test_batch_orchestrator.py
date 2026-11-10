@@ -230,7 +230,7 @@ def test_historical_task_signatures_fall_back_to_local_job_logs(
 
     assert results[0]["task_signature"].identity_key == (
         "setup",
-        "",
+        "common",
         "install dependencies",
         "yum",
         "/roles/common/tasks/main.yml",
