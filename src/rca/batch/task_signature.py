@@ -36,14 +36,6 @@ def _normalize_error(value: Any) -> str:
     return _TIMESTAMP_PATTERN.sub("<timestamp>", normalized)
 
 
-def _role_from_task_path(value: Any) -> str:
-    normalized = _normalize_path(value)
-    roles_marker = "/roles/"
-    if roles_marker not in normalized:
-        return ""
-    return normalized.split(roles_marker, 1)[1].split("/", 1)[0]
-
-
 @dataclass(frozen=True)
 class TaskSignature:
     """A failed Ansible task's stable identity and normalized error."""
@@ -57,12 +49,9 @@ class TaskSignature:
 
     @property
     def identity_key(self) -> tuple[str, str, str, str, str]:
-        role = _normalize_text(self.role) or _normalize_text(
-            _role_from_task_path(self.task_path)
-        )
         return (
             _normalize_text(self.play),
-            role,
+            _normalize_text(self.role),
             _normalize_text(self.task),
             _normalize_text(self.task_action),
             _normalize_path(self.task_path),
