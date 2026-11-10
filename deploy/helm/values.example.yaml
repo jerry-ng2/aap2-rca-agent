@@ -36,6 +36,9 @@ ssh:
   jumpboxAlias: ci-jumpbox
 
 secrets:
+  # Set to false to skip rendering the Secrets below, e.g. when they already
+  # exist in the namespace and are managed outside this chart (GitOps).
+  create: true
   names:
     vertexCreds: claude-vertex-creds
     litellmCreds: claude-litellm-creds
