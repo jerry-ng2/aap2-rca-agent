@@ -245,6 +245,10 @@ The Docker image uses `python:3.12-slim` and installs the package, including
 the pinned Claude Agent SDK. The CronJob prepares SSH/GCP credentials in its
 init container before running `rca-batch`.
 
+The chart creates the credential Secrets by default. Set `secrets.create: false`
+when they already exist in the namespace and are managed outside the chart, for
+example by GitOps; the CronJob still reads them by the names in `secrets.names`.
+
 Use `deploy/run-eval.sh <job-id>` to run the installed single-job entry point
 inside the existing eval pod.
 
