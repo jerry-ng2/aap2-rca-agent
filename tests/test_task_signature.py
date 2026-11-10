@@ -67,6 +67,20 @@ def test_play_level_task_without_role_is_complete() -> None:
     assert signature.is_complete
 
 
+def test_task_signature_infers_missing_role_from_task_path() -> None:
+    task_path = "/project/ansible/roles/common/tasks/main.yml"
+    first = build_task_signature(
+        {"failed_tasks": [_failed_task(role="common", task_path=task_path)]}
+    )
+    second = build_task_signature(
+        {"failed_tasks": [_failed_task(role="", task_path=task_path)]}
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.identity_key == second.identity_key
+
+
 def test_task_signature_ignores_task_path_line_numbers() -> None:
     first = build_task_signature(
         {"failed_tasks": [_failed_task(task_path="/roles/common/tasks/main.yml:10")]}
