@@ -339,6 +339,7 @@ def test_main_delegates_known_issue_filter_to_shared_helper(monkeypatch, capsys)
             "catalog_item": "widget",
             "root_cause_category": "infrastructure",
             "root_cause_summary": "Repeated connection reset",
+            "task_signature": _signature().__dict__,
         }
     ]
     job_metadata = {
@@ -383,6 +384,7 @@ def test_main_delegates_known_issue_filter_to_shared_helper(monkeypatch, capsys)
     fetch_recent_results.assert_called_once_with(connection, "results", "events", 8)
     fetch_job_metadata.assert_called_once_with(connection, "events", job_ids)
     pre_analysis_gate.assert_called_once_with(job_ids, job_metadata, recent_results)
+    assert recent_results[0]["task_signature"] == _signature()
     connection.close.assert_called_once_with()
     assert json.loads(capsys.readouterr().out) == expected
 

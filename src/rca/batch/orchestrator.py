@@ -223,10 +223,7 @@ def _load_pre_analysis_contexts(
             failed_outcomes.append((job_id, exc))
             continue
         if path is None or context is None:
-            logger.warning(
-                "Task context for job %s was unavailable; signature matching may be bypassed",
-                job_id,
-            )
+            logger.debug("Task context for job %s was unavailable", job_id)
             continue
         contexts[job_id] = context
         job_log_paths[job_id] = path
@@ -238,11 +235,7 @@ def _load_pre_analysis_contexts(
             len(job_ids),
         )
         for job_id, exc in failed_outcomes:
-            logger.warning(
-                "Task context for job %s failed to load; signature matching may be bypassed: %s",
-                job_id,
-                exc,
-            )
+            logger.debug("Job %s task-context load failed: %s", job_id, exc)
 
     return contexts, job_log_paths
 
@@ -1551,29 +1544,15 @@ def run_batch(
                 logger.warning("Could not load pre-filter history; continuing with dedup only: %s", exc)
         _attach_historical_task_signatures(recent_results, config)
 
-        try:
-            _baseline_analyze_ids, baseline_skip_targets, _baseline_dupes = pre_analysis_gate(
-                job_ids,
-                metadata,
-                recent_results,
-                use_history=not no_pre_filter,
-            )
-        except (ValueError, KeyError, TypeError) as exc:
-            logger.warning("Baseline pre-analysis gate failed; analyzing all jobs: %s", exc)
-            _baseline_analyze_ids, baseline_skip_targets = list(job_ids), {}
-
-        context_job_ids = [
-            job_id for job_id in job_ids if job_id not in baseline_skip_targets
-        ]
         logger.info(
-            "[STEP 1a] Fetching task contexts for %d unresolved job(s)",
-            len(context_job_ids),
+            "[STEP 1a] Fetching task contexts for %d job(s)",
+            len(job_ids),
         )
         task_contexts, job_log_paths = _load_pre_analysis_contexts(
-            context_job_ids, config, pool
+            job_ids, config, pool
         )
         missing_context_ids = [
-            job_id for job_id in context_job_ids if job_id not in task_contexts
+            job_id for job_id in job_ids if job_id not in task_contexts
         ]
         if missing_context_ids:
             logger.warning(

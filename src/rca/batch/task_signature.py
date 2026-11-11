@@ -37,6 +37,12 @@ def _normalize_error(value: Any) -> str:
     return _TIMESTAMP_PATTERN.sub("<timestamp>", normalized)
 
 
+def normalize_task_name(value: Any) -> str:
+    """Normalize an Ansible task name for candidate lookup."""
+
+    return _normalize_text(value)
+
+
 @dataclass(frozen=True)
 class TaskSignature:
     """A failed Ansible task's stable identity and normalized error."""
@@ -64,8 +70,8 @@ class TaskSignature:
 
     @property
     def is_complete(self) -> bool:
-        play, _role, task, task_action, task_path = self.identity_key
-        return all((play, task, task_action, task_path, self.normalized_error))
+        play, _role, task, task_action, _task_path = self.identity_key
+        return all((play, task, task_action, self.normalized_error))
 
 
 def task_signature_data(

@@ -226,7 +226,7 @@ def test_historical_task_signatures_prefer_persisted_jsonb(
     )
 
 
-def test_pre_analysis_context_load_failure_is_logged_with_job_id(
+def test_pre_analysis_context_load_failure_is_debug_logged_with_job_id(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
@@ -248,20 +248,19 @@ def test_pre_analysis_context_load_failure_is_logged_with_job_id(
         "rca.analysis.pipeline._resolve_job_log", fake_resolve_job_log
     )
 
-    caplog.set_level(logging.WARNING, logger="rca.batch")
+    caplog.set_level(logging.DEBUG, logger="rca.batch")
     contexts, job_log_paths = orchestrator._load_pre_analysis_contexts(
         [101], config, pool
     )
 
     assert contexts == {}
     assert job_log_paths == {}
-    warning = next(
+    record = next(
         record
         for record in caplog.records
-        if record.levelname == "WARNING" and "job 101" in record.message
+        if record.levelname == "DEBUG" and "job 101" in record.getMessage().casefold()
     )
-    assert "remote log unavailable" in warning.message
-    assert "signature matching may be bypassed" in warning.message
+    assert "remote log unavailable" in record.getMessage()
 
 
 def test_historical_task_signatures_fall_back_to_local_job_logs(
@@ -1045,7 +1044,7 @@ def test_failed_representative_falls_back_to_next_duplicate(
     assert updated_dupes == [{"job_id": 102, "representative_job_id": 101}]
 
 
-def test_pre_analysis_fetches_contexts_only_for_unresolved_jobs(
+def test_pre_analysis_fetches_task_contexts_for_all_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1065,6 +1064,7 @@ def test_pre_analysis_fetches_contexts_only_for_unresolved_jobs(
         }
     ]
     context = {"failed_tasks": [{"task": "Install dependencies"}]}
+    contexts = {job_id: context for job_id in (10, 11, 12)}
     log_path = tmp_path / "job_10.json"
     gate_task_contexts = []
 
@@ -1077,8 +1077,6 @@ def test_pre_analysis_fetches_contexts_only_for_unresolved_jobs(
         task_contexts: dict[int, dict[str, object]] | None = None,
     ) -> tuple[list[int], dict[int, int], list[dict[str, object]]]:
         gate_task_contexts.append(task_contexts)
-        if task_contexts is None:
-            return [10], {11: 90, 12: 90}, []
         return [], {11: 90, 12: 90}, []
 
     monkeypatch.setattr(orchestrator, "pooled_connection", lambda pool: nullcontext(Mock()))
@@ -1088,7 +1086,7 @@ def test_pre_analysis_fetches_contexts_only_for_unresolved_jobs(
     monkeypatch.setattr(orchestrator, "fetch_known_issues", Mock(return_value=[]))
     monkeypatch.setattr(orchestrator, "_attach_historical_task_signatures", Mock())
     monkeypatch.setattr(orchestrator, "pre_analysis_gate", fake_pre_analysis_gate)
-    context_loader = Mock(return_value=({10: context}, {10: log_path}))
+    context_loader = Mock(return_value=(contexts, {10: log_path}))
     monkeypatch.setattr(orchestrator, "_load_pre_analysis_contexts", context_loader)
     monkeypatch.setattr(orchestrator, "store_pre_matched", Mock())
     analyze_jobs = Mock()
@@ -1096,8 +1094,8 @@ def test_pre_analysis_fetches_contexts_only_for_unresolved_jobs(
 
     assert orchestrator.run_batch(config, pool=pool, cwd=tmp_path) == 0
 
-    assert gate_task_contexts == [None, {10: context}]
-    assert context_loader.call_args.args == ([10], config, pool)
+    assert gate_task_contexts == [contexts]
+    assert context_loader.call_args.args == ([10, 11, 12], config, pool)
     analyze_jobs.assert_not_called()
 
 

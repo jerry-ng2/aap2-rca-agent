@@ -71,6 +71,13 @@ def test_play_level_task_without_role_is_complete() -> None:
     assert signature.is_complete
 
 
+def test_task_signature_without_task_path_is_complete() -> None:
+    signature = build_task_signature({"failed_tasks": [_failed_task(task_path="")]})
+
+    assert signature is not None
+    assert signature.is_complete
+
+
 def test_task_signature_ignores_task_path_line_numbers() -> None:
     first = build_task_signature(
         {"failed_tasks": [_failed_task(task_path="/roles/common/tasks/main.yml:10")]}

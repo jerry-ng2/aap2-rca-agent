@@ -15,7 +15,12 @@ import psycopg2.sql
 from rca.config import load_database_config
 from rca.database import connect_db, known_issue_active_sql
 from rca.batch.match import MatchSignals, score_similarity
-from rca.batch.task_signature import TaskSignature, build_task_signature
+from rca.batch.task_signature import (
+    TaskSignature,
+    build_task_signature,
+    deserialize_task_signature,
+    normalize_task_name,
+)
 
 
 
@@ -38,8 +43,8 @@ def extract_catalog_item(job_name: str) -> str | None:
 def _same_task_name(left: str | None, right: str | None) -> bool:
     """Treat an unavailable task name as compatible for fallback matching."""
 
-    left_key = " ".join(str(left or "").casefold().split())
-    right_key = " ".join(str(right or "").casefold().split())
+    left_key = normalize_task_name(left)
+    right_key = normalize_task_name(right)
     return not left_key or not right_key or left_key == right_key
 
 
@@ -349,6 +354,12 @@ def main(argv: list[str] | None = None) -> int:
                 config["source_table"],
                 args.lookback_hours,
             )
+            for recent_result in recent_results:
+                signature = deserialize_task_signature(
+                    recent_result.get("task_signature")
+                )
+                if signature is not None:
+                    recent_result["task_signature"] = signature
             job_metadata = fetch_job_metadata(
                 conn,
                 config["source_table"],
