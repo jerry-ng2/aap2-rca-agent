@@ -38,6 +38,8 @@ CREATE TABLE {RESULTS_TABLE} (
     job_duration_seconds INTEGER,
     ticket_link TEXT,
     ticket_resolve_datetime_gmt TIMESTAMPTZ,
+    task_signature JSONB NULL,
+    task_name TEXT NULL,
     UNIQUE (batch_id, job_id)
 );
 
