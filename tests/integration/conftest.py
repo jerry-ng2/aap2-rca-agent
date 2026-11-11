@@ -36,6 +36,8 @@ CREATE TABLE {RESULTS_TABLE} (
     related_result_confidence TEXT
         CHECK (related_result_confidence IN ('high', 'medium', 'low')),
     job_duration_seconds INTEGER,
+    task_name TEXT,
+    task_signature JSONB,
     ticket_link TEXT,
     ticket_resolve_datetime_gmt TIMESTAMPTZ,
     task_signature JSONB NULL,

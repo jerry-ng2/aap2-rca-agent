@@ -32,6 +32,7 @@ class MatchSignals:
 
     catalog_item: str | None
     text: str | None
+    task_name: str | None = None
     category: str | None = None
     task_signature: TaskSignature | None = None
 
