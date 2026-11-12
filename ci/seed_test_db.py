@@ -459,8 +459,6 @@ def main() -> int:
         task_signature JSONB,
         ticket_link TEXT,
         ticket_resolve_datetime_gmt TIMESTAMPTZ,
-        task_signature JSONB NULL,
-        task_name TEXT NULL,
         CONSTRAINT results_batch_job_unique UNIQUE (batch_id, job_id)
     );
 
